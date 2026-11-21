@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+kommand-source/config.json
+kommand-source/debug/
+kommand-central/layout.json
+kommand-central/logs/
+

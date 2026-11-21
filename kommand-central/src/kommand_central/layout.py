@@ -1,0 +1,220 @@
+"""Persistent recursive grid layout model."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import json
+from pathlib import Path
+import threading
+from typing import Any
+
+
+@dataclass(slots=True)
+class SlotNode:
+    channel: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "slot", "channel": self.channel}
+
+
+@dataclass(slots=True)
+class GridNode:
+    rows: int
+    columns: int
+    children: list[SlotNode | "GridNode"] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _validate_dimensions(self.rows, self.columns)
+        expected = self.rows * self.columns
+        if not self.children:
+            self.children = [SlotNode() for _ in range(expected)]
+        if len(self.children) != expected:
+            raise ValueError("Grid child count does not match its dimensions.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": "grid",
+            "rows": self.rows,
+            "columns": self.columns,
+            "children": [child.to_dict() for child in self.children],
+        }
+
+
+LayoutNode = SlotNode | GridNode
+
+
+def _validate_dimensions(rows: int, columns: int) -> None:
+    if not 1 <= rows <= 12 or not 1 <= columns <= 12:
+        raise ValueError("Rows and columns must be between 1 and 12.")
+
+
+def _node_from_dict(raw: dict[str, Any]) -> LayoutNode:
+    if raw.get("type") == "slot":
+        return SlotNode(channel=raw.get("channel"))
+    if raw.get("type") == "grid":
+        return GridNode(
+            rows=int(raw["rows"]),
+            columns=int(raw["columns"]),
+            children=[_node_from_dict(child) for child in raw.get("children", [])],
+        )
+    raise ValueError("Unknown layout node type.")
+
+
+class LayoutStore:
+    def __init__(self, path: Path | None = None):
+        self.path = path
+        self._lock = threading.RLock()
+        self._root = GridNode(2, 2)
+        self._revision = 0
+        if path and path.exists():
+            self._root = self._load(path)
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return self._root.to_dict()
+
+    def resize(self, rows: int, columns: int) -> None:
+        _validate_dimensions(rows, columns)
+        with self._lock:
+            previous = self._root
+            children = [
+                previous.children[row * previous.columns + column]
+                if row < previous.rows and column < previous.columns
+                else SlotNode()
+                for row in range(rows)
+                for column in range(columns)
+            ]
+            self._root = GridNode(rows, columns, children)
+            self._revision += 1
+            self._save()
+
+    def nest(self, path: tuple[int, ...], rows: int, columns: int) -> None:
+        with self._lock:
+            parent, index = self._parent(path)
+            if isinstance(parent.children[index], GridNode):
+                raise ValueError("Only a leaf slot can be subdivided.")
+            parent.children[index] = GridNode(rows, columns)
+            self._revision += 1
+            self._save()
+
+    def flatten(self, path: tuple[int, ...]) -> None:
+        with self._lock:
+            parent, index = self._parent(path)
+            parent.children[index] = SlotNode()
+            self._revision += 1
+            self._save()
+
+    def assign(self, path: tuple[int, ...], channel: str | None) -> None:
+        with self._lock:
+            node = self._resolve(path)
+            if not isinstance(node, SlotNode):
+                raise ValueError("Channels can only be assigned to leaf slots.")
+            node.channel = channel or None
+            self._revision += 1
+            self._save()
+
+    def move_or_swap(
+        self, source: tuple[int, ...], destination: tuple[int, ...], expected_revision: int
+    ) -> None:
+        with self._lock:
+            if self._revision != expected_revision:
+                raise ValueError("The layout changed during the drag. Please try again.")
+            source_node = self._resolve(source)
+            destination_node = self._resolve(destination)
+            if not isinstance(source_node, SlotNode) or not isinstance(destination_node, SlotNode):
+                raise ValueError("Channels can only be moved between leaf slots.")
+            if source_node.channel is None:
+                raise ValueError("The source panel has no assigned channel.")
+            if source == destination:
+                return
+            source_node.channel, destination_node.channel = destination_node.channel, source_node.channel
+            try:
+                self._save()
+            except OSError:
+                source_node.channel, destination_node.channel = destination_node.channel, source_node.channel
+                raise
+            self._revision += 1
+
+    def leaves(self) -> list[tuple[tuple[int, ...], SlotNode]]:
+        with self._lock:
+            found: list[tuple[tuple[int, ...], SlotNode]] = []
+
+            def walk(node: LayoutNode, path: tuple[int, ...]) -> None:
+                if isinstance(node, SlotNode):
+                    found.append((path, SlotNode(node.channel)))
+                else:
+                    for index, child in enumerate(node.children):
+                        walk(child, path + (index,))
+
+            walk(self._root, ())
+            return found
+
+    def grids(self) -> list[tuple[tuple[int, ...], GridNode]]:
+        with self._lock:
+            found: list[tuple[tuple[int, ...], GridNode]] = []
+
+            def walk(node: LayoutNode, path: tuple[int, ...]) -> None:
+                if isinstance(node, GridNode):
+                    found.append((path, node))
+                    for index, child in enumerate(node.children):
+                        walk(child, path + (index,))
+
+            walk(self._root, ())
+            return found
+
+    def _resolve(self, path: tuple[int, ...]) -> LayoutNode:
+        node: LayoutNode = self._root
+        for index in path:
+            if not isinstance(node, GridNode) or index < 0 or index >= len(node.children):
+                raise ValueError("Invalid layout slot path.")
+            node = node.children[index]
+        return node
+
+    def _parent(self, path: tuple[int, ...]) -> tuple[GridNode, int]:
+        if not path:
+            raise ValueError("The root grid cannot be replaced as a slot.")
+        parent = self._resolve(path[:-1])
+        if not isinstance(parent, GridNode):
+            raise ValueError("Invalid layout slot path.")
+        index = path[-1]
+        if index < 0 or index >= len(parent.children):
+            raise ValueError("Invalid layout slot path.")
+        return parent, index
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps(self._root.to_dict(), indent=2) + "\n", encoding="utf-8")
+        temporary.replace(self.path)
+
+    @staticmethod
+    def _load(path: Path) -> GridNode:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        node = _node_from_dict(raw)
+        if not isinstance(node, GridNode):
+            raise ValueError("Layout root must be a grid.")
+        return node
+
+
+def parse_path(value: str) -> tuple[int, ...]:
+    if value == "":
+        return ()
+    try:
+        return tuple(int(part) for part in value.split("."))
+    except ValueError as exc:
+        raise ValueError("Invalid layout slot path.") from exc
+
+
+def format_path(path: tuple[int, ...]) -> str:
+    return ".".join(str(index) for index in path)
+
+
+def format_panel_label(path: tuple[int, ...]) -> str:
+    return f"Panel {'.'.join(str(index + 1) for index in path)}"
