@@ -5,6 +5,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import av
 import requests
 from PIL import Image, ImageChops
 
@@ -182,6 +183,9 @@ class PatchIntegrationTests(unittest.TestCase):
         self.assertEqual(stored.image.size, (127, 125))
         self.assertGreater(stored.image.getpixel((40, 40))[2], 200)
         self.assertTrue(stored.streaming)
+        self.client.upload(channel, frame(blue, ("screen", 2)))
+        self.assertNotEqual(self.session.headers[-1]["X-Kommand-Video-Stream"], stream_id)
+        self.assertEqual(self.session.headers[-1]["X-Kommand-Video-Sequence"], "0")
         resized = Image.new("RGB", (64, 64), "green")
         self.client.upload(channel, frame(resized))
         self.assertNotEqual(self.session.headers[-1]["X-Kommand-Video-Stream"], stream_id)
@@ -194,6 +198,19 @@ class PatchIntegrationTests(unittest.TestCase):
         stored = self.store.get("source-1", "main")
         assert stored is not None
         self.assertEqual(stored.image.size, (64, 64))
+
+    def test_video_keyframe_interval_uses_elapsed_time(self) -> None:
+        channel = ChannelConfig(name="main", format="video", video_fps=15, full_frame_interval_seconds=1)
+        with patch("kommand_source.transport.http.time.monotonic", return_value=100):
+            self.client.upload(channel, frame(self.image))
+        with patch("kommand_source.transport.http.time.monotonic", return_value=101):
+            self.client.upload(channel, frame(self.image))
+        self.assertEqual(self.session.headers[0]["X-Kommand-Video-Stream"], self.session.headers[1]["X-Kommand-Video-Stream"])
+        decoder = av.CodecContext.create("h264", "r")
+        first = decoder.decode(av.Packet(self.session.payloads[0]))
+        second = decoder.decode(av.Packet(self.session.payloads[1]))
+        self.assertTrue(first[0].key_frame)
+        self.assertTrue(second[0].key_frame)
 
     def test_video_rejects_out_of_order_packets_and_recovers_after_restart(self) -> None:
         channel = ChannelConfig(name="main", format="video")
