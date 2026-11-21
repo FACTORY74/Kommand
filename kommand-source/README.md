@@ -46,11 +46,13 @@ backend, avoiding an unused numerical thread pool. An existing setting is respec
 ## Capture targets
 
 - `screen`: use `0` for the combined desktop, or `1`, `2`, and so on for an
-  individual monitor.
-- `window` (Windows): select a visible, non-minimized window from the refreshable
-  list. Source captures its window handle and updates the displayed title every
-  five seconds, so title changes do not interrupt capture. If the window closes
-  or its saved process identity no longer matches, select it again; Source does
+  individual monitor. An application window requires the `window` type rather
+  than a window title as a screen target.
+- `window` (Windows): select a visible, non-minimized window from the list,
+  which refreshes when opened. Source captures its window handle and updates the
+  displayed title every five seconds, so title changes do not interrupt capture.
+  If the window closes or its saved process identity no longer matches, select
+  it again; Source does
   not silently switch to another window. Existing title-only settings are bound
   to a matching window when possible. Windows Graphics Capture renders the
   selected window even when other windows overlap it. Applications can block
@@ -60,8 +62,11 @@ Existing `region` channels remain supported, but cannot be selected for new
 channels in the UI.
 
 Channels can be added, updated, disabled, or removed while capture is running.
-Changes apply when **Add / update** or **Remove** is clicked; unchanged channels
-continue capturing. Source name and Central URL changes apply on **Save**.
+Choose **New** to clear the editor, then **Update** to add the channel. For an
+existing channel, **Update** is enabled when its fields change. Invalid fields
+are highlighted red. Changes apply when **Update** or **Remove** is clicked;
+unchanged channels continue capturing. Source name and Central URL changes apply
+on **Save**.
 Previously published frames and Central panel assignments remain in place.
 
 Linux window capture depends on the display system and is not yet enabled. Use a
@@ -78,6 +83,8 @@ screen target on Linux until X11 and Wayland requirements are decided.
 
 Quality affects WebP compression and H.264 quality. The full-frame interval
 controls periodic full frames in patch mode and keyframes in video mode.
+The editor shows only the controls used by the selected format; switching
+formats retains the other settings for later use.
 Video restarts with a keyframe after a capture alignment or size change, an
 upload error, or a Central restart. Updating formats while running restarts only
 the affected channel.

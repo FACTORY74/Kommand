@@ -9,7 +9,7 @@ from typing import Mapping
 from PIL import Image
 import mss
 
-from kommand_source.config import ChannelConfig
+from kommand_source.config import ChannelConfig, parse_region_target, parse_screen_target
 from kommand_source.capture.wgc_provider import (
     WindowCaptureResized,
     WindowsCaptureSession,
@@ -107,10 +107,10 @@ class MssCaptureProvider:
     ) -> Mapping[str, int]:
         if channel.capture_type == "screen":
             try:
-                index = int(channel.capture_target)
+                index = parse_screen_target(channel.capture_target)
             except ValueError as exc:
-                raise CaptureError("Screen target must be a monitor number.") from exc
-            if index < 0 or index >= len(monitors):
+                raise CaptureError(str(exc)) from exc
+            if index >= len(monitors):
                 available = max(0, len(monitors) - 1)
                 raise CaptureError(
                     f"Monitor {index} is unavailable; {available} monitor(s) detected."
@@ -119,15 +119,9 @@ class MssCaptureProvider:
 
         if channel.capture_type == "region":
             try:
-                left, top, width, height = (
-                    int(value.strip()) for value in channel.capture_target.split(",")
-                )
-            except (ValueError, TypeError) as exc:
-                raise CaptureError(
-                    "Region target must be left,top,width,height."
-                ) from exc
-            if width <= 0 or height <= 0:
-                raise CaptureError("Region width and height must be positive.")
+                left, top, width, height = parse_region_target(channel.capture_target)
+            except ValueError as exc:
+                raise CaptureError(str(exc)) from exc
             return {"left": left, "top": top, "width": width, "height": height}
 
         raise CaptureError(f"Unsupported capture type: {channel.capture_type}")

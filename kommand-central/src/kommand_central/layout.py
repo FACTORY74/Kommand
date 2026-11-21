@@ -4,24 +4,50 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 from pathlib import Path
 import threading
 from typing import Any
 
 
+MIN_ZOOM = 1.0
+MAX_ZOOM = 16.0
+MAX_PAN = 100.0
+
+
+@dataclass(frozen=True, slots=True)
+class Viewport:
+    zoom: float = 1.0
+    pan_x: float = 0.0
+    pan_y: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (
+            not all(math.isfinite(value) for value in (self.zoom, self.pan_x, self.pan_y))
+            or not MIN_ZOOM <= self.zoom <= MAX_ZOOM
+            or abs(self.pan_x) > MAX_PAN
+            or abs(self.pan_y) > MAX_PAN
+        ):
+            raise ValueError("Invalid panel zoom or pan.")
+
+
 @dataclass(slots=True)
 class SlotNode:
     channel: str | None = None
+    view: Viewport = field(default_factory=Viewport)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"type": "slot", "channel": self.channel}
+        return {
+            "type": "slot", "channel": self.channel,
+            "view": {"zoom": self.view.zoom, "pan_x": self.view.pan_x, "pan_y": self.view.pan_y},
+        }
 
 
 @dataclass(slots=True)
 class GridNode:
     rows: int
     columns: int
-    children: list[SlotNode | "GridNode"] = field(default_factory=list)
+    children: list[SlotNode | GridNode] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _validate_dimensions(self.rows, self.columns)
@@ -50,7 +76,21 @@ def _validate_dimensions(rows: int, columns: int) -> None:
 
 def _node_from_dict(raw: dict[str, Any]) -> LayoutNode:
     if raw.get("type") == "slot":
-        return SlotNode(channel=raw.get("channel"))
+        view = raw.get("view", {})
+        if not isinstance(view, dict):
+            raise ValueError("Invalid panel view.")
+        zoom = float(view.get("zoom", 1.0))
+        # Older layouts allowed zoom levels from 0.25 up to fit-to-panel.
+        if 0.25 <= zoom < MIN_ZOOM:
+            zoom = MIN_ZOOM
+        return SlotNode(
+            channel=raw.get("channel"),
+            view=Viewport(
+                zoom=zoom,
+                pan_x=float(view.get("pan_x", 0.0)),
+                pan_y=float(view.get("pan_y", 0.0)),
+            ),
+        )
     if raw.get("type") == "grid":
         return GridNode(
             rows=int(raw["rows"]),
@@ -140,13 +180,31 @@ class LayoutStore:
                 raise
             self._revision += 1
 
+    def set_view(self, path: tuple[int, ...], view: Viewport, expected_revision: int) -> None:
+        with self._lock:
+            if self._revision != expected_revision:
+                raise ValueError("The layout changed while editing the panel. Please try again.")
+            node = self._resolve(path)
+            if not isinstance(node, SlotNode):
+                raise ValueError("Only leaf panels have a view.")
+            if node.view == view:
+                return
+            previous = node.view
+            node.view = view
+            try:
+                self._save()
+            except OSError:
+                node.view = previous
+                raise
+            self._revision += 1
+
     def leaves(self) -> list[tuple[tuple[int, ...], SlotNode]]:
         with self._lock:
             found: list[tuple[tuple[int, ...], SlotNode]] = []
 
             def walk(node: LayoutNode, path: tuple[int, ...]) -> None:
                 if isinstance(node, SlotNode):
-                    found.append((path, SlotNode(node.channel)))
+                    found.append((path, SlotNode(node.channel, node.view)))
                 else:
                     for index, child in enumerate(node.children):
                         walk(child, path + (index,))

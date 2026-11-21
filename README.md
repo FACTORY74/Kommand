@@ -63,7 +63,7 @@ toggle fullscreen and Escape to leave it.
 
 Set the Central URL to `http://127.0.0.1:8000` on the same machine, or
 `http://<central-ip>:8000` on another machine. Give each Source a distinct name.
-Add a named channel, choose a screen or window, select **Add / update**, then
+Select **New**, name the channel, choose a screen or window, select **Update**, then
 **Save config** and **Start capture**. For screen targets, `0` is the combined
 desktop; `1`, `2`, and so on select individual monitors.
 The default format is **WEBP + PATCH**. Choose **WEBP** for full frames or
@@ -76,7 +76,9 @@ Video carries images only, not audio. Update Source and Central together.
 
 Once frames arrive, select a panel in Central, choose a `source/channel`, and
 select **Assign**. Adjust the root grid or subdivide panels to build a layout.
-Source channel edits apply when you select **Add / update** or **Remove**;
+In the display, use the mouse wheel to zoom a panel, drag inside it to pan, or
+drag outside it to move or swap its assignment. Panel views are saved.
+Source channel edits apply when you select **Update** or **Remove**;
 connection changes apply on **Save config**.
 
 ## Linux

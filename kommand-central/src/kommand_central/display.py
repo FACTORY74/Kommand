@@ -12,7 +12,9 @@ from typing import Any
 
 from PIL import Image, ImageOps, ImageTk
 
-from kommand_central.layout import LayoutStore, format_panel_label
+from kommand_central.layout import (
+    MAX_PAN, MAX_ZOOM, MIN_ZOOM, LayoutStore, Viewport, format_panel_label,
+)
 from kommand_central.state import ChannelStore
 from kommand_common.ui import COLORS, action_button
 
@@ -76,6 +78,20 @@ def _windows_place_window(window: tk.Misc, bounds: tuple[int, int, int, int]) ->
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _render_view(image: Image.Image, size: tuple[int, int], view: Viewport) -> Image.Image:
+    if view == Viewport():
+        return ImageOps.contain(image, size, Image.Resampling.LANCZOS)
+    width, height = size
+    scale = min(width / image.width, height / image.height) * view.zoom
+    left = (width - image.width * scale) / 2 + view.pan_x * width
+    top = (height - image.height * scale) / 2 + view.pan_y * height
+    return image.transform(
+        size, Image.Transform.EXTENT,
+        (-left / scale, -top / scale, (width - left) / scale, (height - top) / scale),
+        resample=Image.Resampling.BICUBIC, fillcolor=COLORS["surface"],
+    )
+
+
 @dataclass(slots=True)
 class _Slot:
     path: tuple[int, ...]
@@ -83,6 +99,7 @@ class _Slot:
     tile: tk.Frame
     label: tk.Label
     name: tk.Label
+    view: Viewport
     revision: int | None = None
     size: tuple[int, int] | None = None
     photo: ImageTk.PhotoImage | None = None
@@ -98,6 +115,10 @@ class DisplayWindow(tk.Toplevel):
         self._slot_by_widget: dict[tk.Misc, _Slot] = {}
         self._drag_source: tuple[tuple[int, ...], int] | None = None
         self._drag_target: _Slot | None = None
+        self._drag_slot: _Slot | None = None
+        self._drag_start_position: tuple[int, int] | None = None
+        self._drag_initial_view: Viewport | None = None
+        self._drag_moving = False
         self._refresh_job: str | None = None
         self._windowed_bounds: tuple[int, int, int, int] | None = None
         self._windowed_state = "normal"
@@ -106,6 +127,9 @@ class DisplayWindow(tk.Toplevel):
         self.configure(background=COLORS["background"])
         self.bind("<F11>", self._toggle_fullscreen)
         self.bind("<Escape>", self._exit_fullscreen)
+        self.bind("<MouseWheel>", self._mouse_wheel)
+        self.bind("<Button-4>", lambda event: self._zoom(event, 1))
+        self.bind("<Button-5>", lambda event: self._zoom(event, -1))
         header = tk.Frame(self, background=COLORS["background"])
         header.pack(fill="x")
         tk.Label(
@@ -189,7 +213,7 @@ class DisplayWindow(tk.Toplevel):
             text=f"{format_panel_label(path)} / {channel or 'Unassigned'}", anchor="center",
         )
         name.grid(row=1, column=0, sticky="ew")
-        slot = _Slot(path, channel, tile, label, name)
+        slot = _Slot(path, channel, tile, label, name, Viewport(**node.get("view", {})))
         self._slots.append(slot)
         for widget in (tile, label, name):
             self._slot_by_widget[widget] = slot
@@ -202,10 +226,18 @@ class DisplayWindow(tk.Toplevel):
 
     def _drag_start(self, event: tk.Event) -> None:
         self._drag_source = None
+        self._drag_slot = None
+        self._drag_start_position = None
+        self._drag_initial_view = None
+        self._drag_moving = False
         self._set_drag_target(None)
         slot = self._slot_by_widget.get(event.widget)
         if slot and slot.channel:
             self._drag_source = (slot.path, self._layout_revision)
+            self._drag_slot = slot
+            self._drag_start_position = (event.x_root, event.y_root)
+            self._drag_initial_view = slot.view
+            self._drag_moving = False
 
     def _slot_at(self, x: int, y: int) -> _Slot | None:
         widget = self.winfo_containing(x, y)
@@ -221,7 +253,26 @@ class DisplayWindow(tk.Toplevel):
             slot.tile.configure(highlightbackground=COLORS["primary"])
 
     def _drag_motion(self, event: tk.Event) -> None:
-        if self._drag_source is None:
+        source = self._drag_slot
+        start = self._drag_start_position
+        initial = self._drag_initial_view
+        if self._drag_source is None or source is None or start is None or initial is None:
+            return
+        if not self._inside_tile(source, event.x_root, event.y_root):
+            if not self._drag_moving:
+                source.view = initial
+                source.revision = None
+            self._drag_moving = True
+        if not self._drag_moving:
+            width, height = source.label.winfo_width(), source.label.winfo_height()
+            if width > 1 and height > 1:
+                source.view = Viewport(
+                    initial.zoom,
+                    max(-MAX_PAN, min(MAX_PAN, initial.pan_x + (event.x_root - start[0]) / width)),
+                    max(-MAX_PAN, min(MAX_PAN, initial.pan_y + (event.y_root - start[1]) / height)),
+                )
+                source.revision = None
+            self._set_drag_target(None)
             return
         slot = self._slot_at(event.x_root, event.y_root)
         self._set_drag_target(
@@ -230,18 +281,81 @@ class DisplayWindow(tk.Toplevel):
 
     def _drag_release(self, event: tk.Event) -> None:
         source = self._drag_source
+        source_slot = self._drag_slot
+        initial = self._drag_initial_view
+        moving = self._drag_moving
         self._drag_source = None
+        self._drag_slot = None
+        self._drag_start_position = None
+        self._drag_initial_view = None
+        self._drag_moving = False
         self._set_drag_target(None)
-        if source is None:
+        if source is None or source_slot is None or initial is None:
             return
         target = self._slot_at(event.x_root, event.y_root)
-        if target is None or target.path == source[0]:
+        outside = not self._inside_tile(source_slot, event.x_root, event.y_root)
+        if moving or outside or (target is not None and target.path != source[0]):
+            source_slot.view = initial
+            source_slot.revision = None
+            if target is None or target.path == source[0]:
+                return
+            try:
+                self.layouts.move_or_swap(source[0], target.path, source[1])
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Could not move channel", str(exc), parent=self)
+                return
+            self._refresh()
+            return
+        self._save_view(source_slot, source_slot.view, initial, source[1])
+
+    @staticmethod
+    def _inside_tile(slot: _Slot, x: int, y: int) -> bool:
+        left, top = slot.tile.winfo_rootx(), slot.tile.winfo_rooty()
+        return left <= x < left + slot.tile.winfo_width() and top <= y < top + slot.tile.winfo_height()
+
+    def _mouse_wheel(self, event: tk.Event) -> None:
+        steps = event.delta / 120 if sys.platform == "win32" or abs(event.delta) >= 120 else event.delta
+        self._zoom(event, steps)
+
+    def _zoom(self, event: tk.Event, steps: float) -> None:
+        slot = self._slot_at(event.x_root, event.y_root)
+        if slot is None:
+            candidate = self._slot_by_widget.get(event.widget)
+            if candidate is not None and self._inside_tile(candidate, event.x_root, event.y_root):
+                slot = candidate
+        if slot is None or slot.channel is None or not steps or self._drag_source is not None:
+            return
+        width, height = slot.label.winfo_width(), slot.label.winfo_height()
+        if width <= 1 or height <= 1:
+            return
+        old = slot.view
+        zoom = max(MIN_ZOOM, min(MAX_ZOOM, old.zoom * 1.2 ** max(-20, min(20, steps))))
+        if zoom == old.zoom:
+            return
+        x = (event.x_root - slot.label.winfo_rootx()) / width - 0.5
+        y = (event.y_root - slot.label.winfo_rooty()) / height - 0.5
+        ratio = zoom / old.zoom
+        view = Viewport(
+            zoom,
+            max(-MAX_PAN, min(MAX_PAN, x - ratio * (x - old.pan_x))),
+            max(-MAX_PAN, min(MAX_PAN, y - ratio * (y - old.pan_y))),
+        )
+        self._save_view(slot, view, old, self._layout_revision)
+
+    def _save_view(self, slot: _Slot, view: Viewport, previous: Viewport, revision: int) -> None:
+        if view == previous:
             return
         try:
-            self.layouts.move_or_swap(source[0], target.path, source[1])
+            self.layouts.set_view(slot.path, view, revision)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Could not move channel", str(exc), parent=self)
+            slot.view = previous
+            slot.revision = None
+            messagebox.showerror("Could not save panel view", str(exc), parent=self)
+            self._refresh()
             return
+        slot.view = view
+        slot.revision = None
+        self._layout_revision = revision + 1
         self._refresh()
 
     def _refresh(self) -> None:
@@ -250,6 +364,10 @@ class DisplayWindow(tk.Toplevel):
         layout_revision = self.layouts.revision
         if layout_revision != self._layout_revision:
             self._drag_source = None
+            self._drag_slot = None
+            self._drag_start_position = None
+            self._drag_initial_view = None
+            self._drag_moving = False
             self._set_drag_target(None)
             for child in self.content.winfo_children():
                 child.destroy()
@@ -272,7 +390,7 @@ class DisplayWindow(tk.Toplevel):
                 continue
             if frame.revision == slot.revision and size == slot.size:
                 continue
-            scaled = ImageOps.contain(frame.image, size, Image.Resampling.LANCZOS)
+            scaled = _render_view(frame.image, size, slot.view)
             photo = ImageTk.PhotoImage(scaled, master=self)
             label.configure(image=photo, text="")
             slot.photo = photo

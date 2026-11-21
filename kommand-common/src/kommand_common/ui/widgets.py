@@ -26,6 +26,7 @@ class NumberStepper(ttk.Frame):
         zero_pad: int = 0,
         command: Callable[[int], None] | None = None,
         button_size: int = 38,
+        allow_invalid: bool = False,
     ) -> None:
         super().__init__(parent, style="Stepper.TFrame")
         if minimum > maximum or step <= 0:
@@ -36,6 +37,7 @@ class NumberStepper(ttk.Frame):
         self.step = step
         self.zero_pad = zero_pad
         self.command = command
+        self.allow_invalid = allow_invalid
 
         minus_segment = ttk.Frame(
             self, width=button_size, height=button_size, style="StepperSegment.TFrame"
@@ -110,6 +112,13 @@ class NumberStepper(ttk.Frame):
         self.set(self.get() + delta, notify=True)
 
     def _commit(self, _event: object = None) -> str | None:
+        if self.allow_invalid:
+            try:
+                value = int(self.variable.get())
+            except ValueError:
+                return "break" if _event is not None else None
+            if not self.minimum <= value <= self.maximum:
+                return "break" if _event is not None else None
         self.set(self.get(), notify=True)
         return "break" if _event is not None else None
 

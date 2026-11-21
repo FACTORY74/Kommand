@@ -22,12 +22,14 @@ class VideoEncoder:
         self.codec.width = width + width % 2
         self.codec.height = height + height % 2
         self.codec.pix_fmt = "yuv420p"
+        # Avoid a large default thread pool for every channel.
+        self.codec.thread_count = 2
         self.codec.time_base = Fraction(1, fps)
         self.codec.framerate = Fraction(fps, 1)
         self.codec.options = {
             "preset": "ultrafast",
             "tune": "zerolatency",
-            "crf": str(round((100 - quality) * 51 / 99)),
+            "crf": str(round(51 * (1 - (quality / 100) ** 2))),
             "x264-params": f"repeat-headers=1:scenecut=0:keyint={fps * keyframe_seconds}",
         }
         self.codec.open()

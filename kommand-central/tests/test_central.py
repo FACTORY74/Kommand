@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from kommand_central.bandwidth import ReceiveBandwidth  # noqa: E402
 from kommand_central.state import ChannelStore  # noqa: E402
-from kommand_central.layout import LayoutStore  # noqa: E402
+from kommand_central.layout import LayoutStore, Viewport  # noqa: E402
 from kommand_central.web import create_app  # noqa: E402
 
 
@@ -265,10 +265,59 @@ class CentralTests(unittest.TestCase):
             self.assertEqual(layouts.revision, revision)
             self.assertEqual(LayoutStore(path).snapshot(), snapshot)
 
+    def test_panel_views_load_persist_and_remain_with_their_panels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            path.write_text(
+                '{"type":"grid","rows":1,"columns":2,"children":'
+                '[{"type":"slot","channel":"source/main"},{"type":"slot","channel":null}]}',
+                encoding="utf-8",
+            )
+            layouts = LayoutStore(path)
+            self.assertEqual(layouts.leaves()[0][1].view, Viewport())
+            view = Viewport(2.0, 0.1, -0.2)
+            revision = layouts.revision
+            layouts.set_view((0,), view, revision)
+            self.assertEqual(LayoutStore(path).leaves()[0][1].view, view)
+            layouts.move_or_swap((0,), (1,), layouts.revision)
+            leaves = layouts.leaves()
+            self.assertEqual((leaves[0][1].channel, leaves[0][1].view), (None, view))
+            self.assertEqual((leaves[1][1].channel, leaves[1][1].view), ("source/main", Viewport()))
+            snapshot = layouts.snapshot()
+            revision = layouts.revision
+            with patch.object(layouts, "_save", side_effect=OSError("disk error")):
+                with self.assertRaises(OSError):
+                    layouts.set_view((1,), view, revision)
+            self.assertEqual(layouts.snapshot(), snapshot)
+            self.assertEqual(layouts.revision, revision)
+            self.assertEqual(LayoutStore(path).snapshot(), snapshot)
+            with self.assertRaises(ValueError):
+                layouts.set_view((1,), view, revision - 1)
+            for value in (float("nan"), 0.0, 0.5, 17.0):
+                with self.assertRaises(ValueError):
+                    Viewport(zoom=value)
+
     def test_layout_api_returns_grid(self) -> None:
         response = self.client.get("/api/v1/layout")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["layout"]["type"], "grid")
+
+    def test_existing_zoomed_out_views_migrate_to_fit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            path.write_text(
+                '{"type":"grid","rows":1,"columns":2,"children":['
+                '{"type":"slot","channel":"source/main",'
+                '"view":{"zoom":0.25,"pan_x":0.1,"pan_y":-0.2}},'
+                '{"type":"slot","channel":"source/other",'
+                '"view":{"zoom":2,"pan_x":0.3,"pan_y":0.4}}]}',
+                encoding="utf-8",
+            )
+            layouts = LayoutStore(path)
+            self.assertEqual(layouts.leaves()[0][1].view, Viewport(1.0, 0.1, -0.2))
+            self.assertEqual(layouts.leaves()[1][1].view, Viewport(2.0, 0.3, 0.4))
+            layouts.assign((0,), "source/main")
+            self.assertEqual(LayoutStore(path).snapshot(), layouts.snapshot())
 
 
 if __name__ == "__main__":

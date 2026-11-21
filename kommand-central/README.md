@@ -26,13 +26,17 @@ Central starts with a 2×2 root grid. Set the root rows and columns and select
 grids can be repeated to create asymmetric layouts. Select a nested grid and use
 **Remove nesting** to turn it back into a single unassigned panel.
 
-The local display renders the recursive grid and preserves source aspect ratio
+The local display renders the recursive grid and initially fits each source
 without cropping or stretching. Each panel shows its number and assigned
 `source/channel` at the bottom, or `Unassigned` when no source is selected.
 Nested panel numbers match the layout tree (for example, `Panel 1.2`).
-Drag an assigned panel to another panel to move its channel into an empty slot
-or swap the two assignments. The layout tree updates automatically and the
-change is saved.
+Use the mouse wheel over a panel to zoom around the pointer, down to the
+fit-to-panel scale; drag within the
+panel to pan. A drag that leaves the original panel instead moves its channel
+into an empty destination or swaps the two assignments. The in-progress pan is
+discarded when a drag becomes a move. Zoom and pan belong to the panel, not the
+assigned channel, and are saved with the layout; the layout tree updates
+automatically after moves.
 Use **Fullscreen** or F11 to toggle fullscreen,
 and Escape to exit it. On Windows, fullscreen uses the monitor containing most
 of the display window and restores its previous position and size on exit.

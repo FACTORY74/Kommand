@@ -8,7 +8,7 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageTk
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [
@@ -16,8 +16,8 @@ sys.path[:0] = [
     str(ROOT / "kommand-common" / "src"),
 ]
 
-from kommand_central.display import DisplayWindow  # noqa: E402
-from kommand_central.layout import LayoutStore  # noqa: E402
+from kommand_central.display import DisplayWindow, _render_view  # noqa: E402
+from kommand_central.layout import LayoutStore, Viewport  # noqa: E402
 from kommand_central.state import ChannelStore  # noqa: E402
 from kommand_central.ui import CentralApp  # noqa: E402
 
@@ -26,6 +26,157 @@ class DisplayTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.doCleanups()
         gc.collect()
+
+    def test_zoom_and_pan_render_only_the_panel_view(self) -> None:
+        image = Image.new("RGB", (100, 100), "red")
+        image.paste("blue", (50, 0, 100, 100))
+        normal = _render_view(image, (100, 100), Viewport())
+        zoomed = _render_view(image, (100, 100), Viewport(2.0, 0.0, 0.0))
+        panned = _render_view(image, (100, 100), Viewport(2.0, 0.5, 0.0))
+        fitted = _render_view(Image.new("RGB", (200, 100)), (100, 100), Viewport())
+        self.assertEqual(normal.getpixel((90, 50)), (0, 0, 255))
+        self.assertEqual(zoomed.getpixel((90, 50)), (0, 0, 255))
+        self.assertEqual(panned.getpixel((90, 50)), (255, 0, 0))
+        self.assertEqual(panned.size, (100, 100))
+        self.assertEqual(fitted.size, (100, 50))
+
+    def test_panel_wheel_pan_and_move_persist_independently(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            layouts = LayoutStore(path)
+            layouts.assign((0,), "source/main")
+            store = ChannelStore()
+            image = Image.new("RGB", (100, 100), "red")
+            image.paste("blue", (50, 0, 100, 100))
+            store.update("source", "main", None, "image/webp", 100, 100, "now", image)
+            window = DisplayWindow(root, store, layouts)
+            self.addCleanup(window.destroy)
+            window.geometry("800x500-10000-10000")
+            root.update()
+            window._refresh()
+            slot = window._slots[0]
+            label = slot.label
+            width, height = label.winfo_width(), label.winfo_height()
+            x, y = width * 3 // 4, height // 2
+            label.event_generate("<MouseWheel>", x=x, y=y, delta=120 if sys.platform == "win32" else 1)
+            self.assertAlmostEqual(slot.view.zoom, 1.2)
+            self.assertAlmostEqual(slot.view.pan_x, (x / width - 0.5) * -0.2)
+            self.assertEqual(LayoutStore(path).leaves()[0][1].view, slot.view)
+            label.event_generate("<MouseWheel>", x=x, y=y, delta=-120 if sys.platform == "win32" else -1)
+            self.assertAlmostEqual(slot.view.zoom, 1.0)
+            self.assertAlmostEqual(slot.view.pan_x, 0.0)
+            minimum_view = slot.view
+            revision = layouts.revision
+            for _ in range(3):
+                label.event_generate("<MouseWheel>", x=x, y=y, delta=-120 if sys.platform == "win32" else -1)
+            self.assertEqual(slot.view, minimum_view)
+            self.assertEqual(layouts.revision, revision)
+            self.assertEqual(LayoutStore(path).leaves()[0][1].view, minimum_view)
+            label.event_generate("<MouseWheel>", x=x, y=y, delta=120 if sys.platform == "win32" else 1)
+            before_pan = slot.view
+            assert slot.photo is not None
+            before_image = ImageTk.getimage(slot.photo).convert("RGB")
+            left, top = label.winfo_rootx(), label.winfo_rooty()
+            label.event_generate("<ButtonPress-1>", x=x, y=y, rootx=left + x, rooty=top + y)
+            label.event_generate("<B1-Motion>", x=x + 20, y=y + 10, rootx=left + x + 20, rooty=top + y + 10)
+            self.assertAlmostEqual(slot.view.pan_x, before_pan.pan_x + 20 / width)
+            self.assertEqual(layouts.leaves()[0][1].view, before_pan)
+            window._refresh()
+            assert slot.photo is not None
+            after_image = ImageTk.getimage(slot.photo).convert("RGB")
+            self.assertIsNotNone(ImageChops.difference(before_image, after_image).getbbox())
+            label.event_generate("<ButtonRelease-1>", x=x + 20, y=y + 10, rootx=left + x + 20, rooty=top + y + 10)
+            self.assertEqual(layouts.leaves()[0][1].view, slot.view)
+            self.assertEqual(LayoutStore(path).leaves()[0][1].view, slot.view)
+
+            saved_view = slot.view
+            updated_image = Image.new("RGB", (100, 100), "green")
+            store.update("source", "main", None, "image/webp", 100, 100, "later", updated_image)
+            window._refresh()
+            self.assertEqual(slot.view, saved_view)
+            assert slot.photo is not None
+            displayed = ImageTk.getimage(slot.photo).convert("RGB")
+            self.assertEqual(displayed.getpixel((width // 2, height // 2)), (0, 128, 0))
+            revision = layouts.revision
+            label.event_generate("<ButtonPress-1>", x=x, y=y, rootx=left + x, rooty=top + y)
+            label.event_generate("<B1-Motion>", rootx=left + x + 10, rooty=top + y)
+            label.event_generate("<B1-Motion>", rootx=left - 10, rooty=top + y)
+            with patch.object(window, "winfo_containing", return_value=label):
+                label.event_generate("<ButtonRelease-1>", rootx=left + x, rooty=top + y)
+            self.assertEqual(slot.view, saved_view)
+            self.assertEqual(layouts.revision, revision)
+
+            destination = window._slots[1]
+            target_x = destination.label.winfo_rootx() + destination.label.winfo_width() // 2
+            target_y = destination.label.winfo_rooty() + destination.label.winfo_height() // 2
+            label.event_generate("<ButtonPress-1>", x=x, y=y, rootx=left + x, rooty=top + y)
+            label.event_generate("<B1-Motion>", x=x + 10, y=y, rootx=left + x + 10, rooty=top + y)
+            with patch.object(window, "winfo_containing", return_value=destination.label):
+                label.event_generate("<B1-Motion>", rootx=target_x, rooty=target_y)
+                self.assertEqual(slot.view, saved_view)
+                label.event_generate("<ButtonRelease-1>", rootx=target_x, rooty=target_y)
+            self.assertEqual(layouts.leaves()[0][1].view, saved_view)
+            self.assertIsNone(layouts.leaves()[0][1].channel)
+            self.assertEqual(layouts.leaves()[1][1].channel, "source/main")
+            self.assertEqual(layouts.leaves()[1][1].view, Viewport())
+            self.assertEqual(LayoutStore(path).snapshot(), layouts.snapshot())
+
+    def test_failed_view_save_is_reported_and_rolled_back(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        layouts = LayoutStore()
+        layouts.assign((0,), "source/main")
+        window = DisplayWindow(root, ChannelStore(), layouts)
+        self.addCleanup(window.destroy)
+        window.geometry("800x500-10000-10000")
+        root.update()
+        slot = window._slots[0]
+        revision = layouts.revision
+        with patch.object(layouts, "_save", side_effect=OSError("disk error")):
+            with patch("kommand_central.display.messagebox.showerror") as error:
+                slot.label.event_generate(
+                    "<MouseWheel>", x=20, y=20, delta=120 if sys.platform == "win32" else 1
+                )
+        error.assert_called_once()
+        self.assertEqual(slot.view, Viewport())
+        self.assertEqual(layouts.leaves()[0][1].view, Viewport())
+        self.assertEqual(layouts.revision, revision)
+
+    def test_wheel_targets_panel_under_pointer_not_focused_widget(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        layouts = LayoutStore()
+        layouts.assign((0,), "source/first")
+        layouts.assign((1,), "source/second")
+        window = DisplayWindow(root, ChannelStore(), layouts)
+        self.addCleanup(window.destroy)
+        window.geometry("800x500-10000-10000")
+        root.update()
+        first, second = window._slots[:2]
+        x = second.label.winfo_rootx() + second.label.winfo_width() // 2
+        y = second.label.winfo_rooty() + second.label.winfo_height() // 2
+        with patch.object(window, "winfo_containing", return_value=second.label):
+            first.label.event_generate(
+                "<MouseWheel>", rootx=x, rooty=y, delta=120 if sys.platform == "win32" else 1
+            )
+            with patch("kommand_central.display.sys.platform", "linux"):
+                first.label.event_generate("<MouseWheel>", rootx=x, rooty=y, delta=120)
+        self.assertEqual(first.view, Viewport())
+        self.assertAlmostEqual(second.view.zoom, 1.44)
 
     @unittest.skipUnless(sys.platform == "win32", "Windows native fullscreen placement")
     def test_fullscreen_uses_current_monitor_and_restores_window_bounds(self) -> None:

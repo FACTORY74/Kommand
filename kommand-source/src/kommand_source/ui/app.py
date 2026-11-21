@@ -9,7 +9,9 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from kommand_source.config import ChannelConfig, SourceConfig, save_config
+from kommand_source.config import (
+    CHANNEL_NAME_PATTERN, ChannelConfig, SourceConfig, parse_region_target, parse_screen_target, save_config,
+)
 from kommand_source.capture.windows import (
     WindowDiscoveryError,
     WindowIdentity,
@@ -82,17 +84,30 @@ class SourceApp(ttk.Frame):
         self.connection_events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.connection_check_running = False
         self.window_events: queue.Queue[
-            tuple[list[WindowInfo], list[tuple[str, WindowIdentity, str | None, str | None]]]
+            list[tuple[str, WindowIdentity, str | None, str | None]]
         ] = queue.Queue()
         self.window_check_thread: threading.Thread | None = None
         self._window_choices: dict[str, WindowInfo] = {}
         self._editor_window_identity: WindowIdentity | None = None
         self._editor_window_title = ""
+        self._editor_capture_type = "screen"
+        self._loading_editor = False
+        self._editor_baseline: tuple[object, ...] = ()
         self._stopping = False
         self._closing = False
 
         self._build()
         self._refresh_channels()
+        self._editor_baseline = self._editor_values()
+        for variable in (
+            self.name, self.capture_type, self.capture_format, self.capture_target,
+            self.interval, self.full_frame_interval, self.quality, self.video_fps, self.enabled,
+        ):
+            variable.trace_add("write", self._editor_changed)
+        self.source_name.trace_add("write", self._connection_changed)
+        self.central_url.trace_add("write", self._connection_changed)
+        self._editor_changed()
+        self._connection_changed()
         self.after(100, self._drain_events)
         self.after(0, self._check_central_connection)
         self.after(0, self._check_window_titles)
@@ -104,8 +119,8 @@ class SourceApp(ttk.Frame):
 
         connection = card(self, "Central connection")
         connection.pack(fill="x")
-        self._entry(connection, "Source name", self.source_name, 0, 0)
-        self._entry(connection, "Central URL", self.central_url, 0, 2, width=38)
+        self.source_name_input = self._entry(connection, "Source name", self.source_name, 0, 0)
+        self.central_url_input = self._entry(connection, "Central URL", self.central_url, 0, 2, width=38)
         ttk.Label(connection, text="Connection status").grid(row=0, column=4, sticky="w")
         ttk.Label(
             connection,
@@ -147,58 +162,68 @@ class SourceApp(ttk.Frame):
         editor = ttk.Frame(channels, padding=(0, 10, 0, 0))
         editor.grid(row=1, column=0, columnspan=6, sticky="ew")
         ttk.Label(editor, text="Channel name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(editor, textvariable=self.name, width=22).grid(
-            row=1, column=0, sticky="ew", padx=(0, 12)
-        )
+        self.name_input = ttk.Entry(editor, textvariable=self.name, width=22, style="Source.TEntry")
+        self.name_input.grid(row=1, column=0, sticky="ew", padx=(0, 12))
         ttk.Label(editor, text="Type").grid(row=0, column=1, sticky="w")
         self.capture_type_input = ttk.Combobox(
             editor,
             textvariable=self.capture_type,
             values=("screen", "window"),
             state="readonly",
+            style="Source.TCombobox",
             width=14,
         )
         self.capture_type_input.grid(row=1, column=1, sticky="ew", padx=(0, 12))
-        self.capture_type_input.bind("<<ComboboxSelected>>", self._capture_type_changed)
+        self.capture_type_input.bind("<<ComboboxSelected>>", self._capture_type_selected)
         ttk.Label(editor, text="Format").grid(row=0, column=2, sticky="w")
         self.format_input = ttk.Combobox(
             editor, textvariable=self.capture_format, values=tuple(FORMAT_LABELS),
-            state="readonly", width=14,
+            state="readonly", width=14, style="Source.TCombobox",
         )
         self.format_input.grid(row=1, column=2, sticky="ew", padx=(0, 12))
+        self.format_input.bind("<<ComboboxSelected>>", self._format_changed)
         ttk.Label(editor, text="Target").grid(row=0, column=3, sticky="w")
-        self.target_input = ttk.Combobox(editor, textvariable=self.capture_target, width=24)
+        self.target_input = ttk.Combobox(
+            editor, textvariable=self.capture_target, width=24,
+            postcommand=self._refresh_window_choices, style="Source.TCombobox",
+        )
         self.target_input.grid(row=1, column=3, sticky="ew", padx=(0, 8))
         self.target_input.bind("<<ComboboxSelected>>", self._window_selected)
+        self.target_input.bind("<FocusOut>", lambda _event: self.target_input.selection_clear(), add="+")
         self.refresh_windows_button = ttk.Button(
             editor, text="REFRESH WINDOWS", command=self._refresh_windows
         )
         self.refresh_windows_button.grid(row=1, column=4, sticky="ew")
 
-        ttk.Label(editor, text="Interval (ms)").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        NumberStepper(editor, self.interval, minimum=250, maximum=86_400_000, step=250, width=10).grid(
-            row=3, column=0, sticky="ew", padx=(0, 12)
+        self.interval_label = ttk.Label(editor, text="Interval (ms)")
+        self.interval_input = NumberStepper(
+            editor, self.interval, minimum=250, maximum=86_400_000, step=250, width=10, allow_invalid=True
         )
-        ttk.Label(editor, text="Full frame (seconds)").grid(row=2, column=1, sticky="w", pady=(10, 0))
-        NumberStepper(editor, self.full_frame_interval, minimum=1, maximum=86_400, width=8).grid(
-            row=3, column=1, sticky="ew", padx=(0, 12)
+        self.full_frame_label = ttk.Label(editor, text="Full/keyframe (sec)")
+        self.full_frame_input = NumberStepper(
+            editor, self.full_frame_interval, minimum=1, maximum=86_400, width=8, allow_invalid=True
         )
-        ttk.Label(editor, text="Quality").grid(row=2, column=2, sticky="w", pady=(10, 0))
-        NumberStepper(editor, self.quality, minimum=1, maximum=100, width=5, zero_pad=2).grid(
-            row=3, column=2, sticky="w", padx=(0, 12)
+        self.quality_label = ttk.Label(editor, text="Quality")
+        self.quality_input = NumberStepper(
+            editor, self.quality, minimum=1, maximum=100, width=5, zero_pad=2, allow_invalid=True
         )
-        ttk.Label(editor, text="Video FPS").grid(row=2, column=3, sticky="w", pady=(10, 0))
-        NumberStepper(editor, self.video_fps, minimum=1, maximum=60, width=5).grid(
-            row=3, column=3, sticky="w", padx=(0, 12)
+        self.video_fps_label = ttk.Label(editor, text="Video FPS")
+        self.video_fps_input = NumberStepper(
+            editor, self.video_fps, minimum=1, maximum=60, width=5, allow_invalid=True
         )
+        for stepper in (self.interval_input, self.full_frame_input, self.quality_input, self.video_fps_input):
+            stepper.entry.configure(style="Source.Stepper.TEntry")
         ttk.Checkbutton(editor, text="Enabled", variable=self.enabled).grid(row=3, column=4, sticky="w")
         editor.columnconfigure(3, weight=1)
         self._capture_type_changed()
+        self._format_changed()
 
         edit_buttons = ttk.Frame(channels, style="Card.TFrame")
         edit_buttons.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(8, 0))
-        action_button(edit_buttons, "Add / update", self._upsert, "primary").pack(side="left")
-        action_button(edit_buttons, "New", self._clear_editor).pack(side="left", padx=8)
+        self.new_button = action_button(edit_buttons, "New", self._clear_editor)
+        self.new_button.pack(side="left")
+        self.update_button = action_button(edit_buttons, "Update", self._upsert, "primary")
+        self.update_button.pack(side="left", padx=8)
         action_button(edit_buttons, "Remove", self._remove, "danger").pack(side="left")
         action_button(edit_buttons, "Capture once", self._capture_once).pack(side="left", padx=8)
 
@@ -213,6 +238,7 @@ class SourceApp(ttk.Frame):
         self.stop_button.configure(state="disabled")
         self.stop_button.pack(side="left")
         ttk.Label(self.actions, textvariable=self.overall_status, style="Status.TLabel").pack(side="right")
+        self._configure_validation_styles()
 
     def _configure_styles(self, master: tk.Tk) -> None:
         colors = self.COLORS
@@ -374,11 +400,110 @@ class SourceApp(ttk.Frame):
         column: int,
         width: int = 18,
         show: str = "",
-    ) -> None:
+    ) -> ttk.Entry:
         ttk.Label(parent, text=label).grid(row=row * 2, column=column, sticky="w", padx=(0, 8))
-        ttk.Entry(parent, textvariable=variable, width=width, show=show).grid(
-            row=row * 2 + 1, column=column, columnspan=2, sticky="ew", padx=(0, 12)
+        entry = ttk.Entry(parent, textvariable=variable, width=width, show=show, style="Source.TEntry")
+        entry.grid(row=row * 2 + 1, column=column, columnspan=2, sticky="ew", padx=(0, 12))
+        return entry
+
+    def _configure_validation_styles(self) -> None:
+        style = ttk.Style(self.master)
+        red_background = "#512730"
+        red = self.COLORS["danger"]
+        style.map(
+            "Source.TEntry", fieldbackground=[("invalid", red_background)],
+            bordercolor=[("invalid", red), ("focus", self.COLORS["primary"])],
+            lightcolor=[("invalid", red), ("focus", self.COLORS["primary"])],
+            darkcolor=[("invalid", red), ("focus", self.COLORS["primary"])],
         )
+        style.map(
+            "Source.TCombobox",
+            fieldbackground=[("invalid", red_background), ("readonly", self.COLORS["surface_high"])],
+            bordercolor=[("invalid", red), ("focus", self.COLORS["primary"])],
+        )
+        style.map(
+            "Source.Stepper.TEntry",
+            fieldbackground=[("invalid", red_background), ("focus", self.COLORS["surface_high"])],
+        )
+
+    def _editor_values(self) -> tuple[object, ...]:
+        target: object = self.capture_target.get().strip()
+        if self.capture_type.get() == "window" and self._editor_window_identity is not None:
+            target = self._editor_window_identity
+
+        def number(variable: tk.StringVar) -> int | str:
+            value = variable.get()
+            try:
+                return int(value)
+            except ValueError:
+                return value
+
+        return (
+            self.name.get().strip(), self.capture_type.get(), self.capture_format.get(), target,
+            number(self.interval), number(self.full_frame_interval), number(self.quality),
+            number(self.video_fps), self.enabled.get(),
+        )
+
+    @staticmethod
+    def _mark_invalid(widget: ttk.Widget, invalid: bool) -> None:
+        widget.state(["invalid" if invalid else "!invalid"])
+
+    def _connection_changed(self, *_args: str) -> None:
+        self._mark_invalid(
+            self.source_name_input, not bool(CHANNEL_NAME_PATTERN.fullmatch(self.source_name.get().strip()))
+        )
+        self._mark_invalid(
+            self.central_url_input, not self.central_url.get().strip().startswith(("http://", "https://"))
+        )
+
+    def _editor_changed(self, *_args: str) -> None:
+        if self._loading_editor:
+            return
+        selected = self.tree.selection()
+        name = self.name.get().strip()
+        duplicate = any(
+            channel.name == name and (not selected or channel.name != selected[0])
+            for channel in self.config.channels
+        )
+        self._mark_invalid(self.name_input, not CHANNEL_NAME_PATTERN.fullmatch(name) or duplicate)
+        capture_type = self.capture_type.get()
+        self._mark_invalid(self.capture_type_input, capture_type not in {"screen", "window", "region"})
+        target_invalid = False
+        if capture_type == "screen":
+            try:
+                parse_screen_target(self.capture_target.get().strip())
+            except ValueError:
+                target_invalid = True
+        elif capture_type == "window":
+            identity = self._editor_window_identity
+            target_invalid = identity is None or self.capture_target.get() != self._window_label(
+                self._editor_window_title, identity.handle
+            )
+        elif capture_type == "region":
+            try:
+                parse_region_target(self.capture_target.get())
+            except ValueError:
+                target_invalid = True
+        self._mark_invalid(self.target_input, target_invalid)
+        hidden_invalid = False
+        for variable, stepper in (
+            (self.interval, self.interval_input), (self.full_frame_interval, self.full_frame_input),
+            (self.quality, self.quality_input), (self.video_fps, self.video_fps_input),
+        ):
+            try:
+                invalid = not stepper.minimum <= int(variable.get()) <= stepper.maximum
+            except ValueError:
+                invalid = True
+            self._mark_invalid(stepper.entry, invalid)
+            hidden_invalid = hidden_invalid or (invalid and not stepper.grid_info())
+        self._mark_invalid(self.format_input, self.capture_format.get() not in FORMAT_LABELS or hidden_invalid)
+        self.update_button.configure(
+            state="normal" if self._editor_values() != self._editor_baseline else "disabled"
+        )
+
+    def _remember_editor(self) -> None:
+        self._editor_baseline = self._editor_values()
+        self._editor_changed()
 
     def _configuration_from_ui(self) -> SourceConfig:
         return SourceConfig(
@@ -395,15 +520,33 @@ class SourceApp(ttk.Frame):
         capture_format = FORMAT_LABELS.get(self.capture_format.get())
         if capture_format is None:
             raise ValueError("Select a valid format.")
+        if self.capture_type.get() == "screen":
+            parse_screen_target(self.capture_target.get().strip())
+        elif self.capture_type.get() == "region":
+            parse_region_target(self.capture_target.get().strip())
+
+        def number(variable: tk.StringVar, stepper: NumberStepper, label: str) -> int:
+            try:
+                value = int(variable.get())
+            except ValueError as exc:
+                raise ValueError(
+                    f"{label} must be a whole number between {stepper.minimum} and {stepper.maximum}."
+                ) from exc
+            if not stepper.minimum <= value <= stepper.maximum:
+                raise ValueError(f"{label} must be between {stepper.minimum} and {stepper.maximum}.")
+            return value
+
         channel = ChannelConfig(
             name=self.name.get().strip(),
             capture_type=self.capture_type.get(),
             capture_target=self._editor_window_title if identity else self.capture_target.get().strip(),
-            interval_ms=int(self.interval.get()),
-            full_frame_interval_seconds=int(self.full_frame_interval.get()),
-            quality=int(self.quality.get()),
+            interval_ms=number(self.interval, self.interval_input, "Capture interval"),
+            full_frame_interval_seconds=number(
+                self.full_frame_interval, self.full_frame_input, "Full/keyframe interval"
+            ),
+            quality=number(self.quality, self.quality_input, "Quality"),
             format=capture_format,
-            video_fps=int(self.video_fps.get()),
+            video_fps=number(self.video_fps, self.video_fps_input, "Video FPS"),
             enabled=self.enabled.get(),
             window_handle=identity.handle if identity else None,
             window_process_id=identity.process_id if identity else None,
@@ -416,6 +559,8 @@ class SourceApp(ttk.Frame):
         try:
             channel = self._channel_from_editor()
             selected = self.tree.selection()
+            if not selected and any(item.name == channel.name for item in self.config.channels):
+                raise ValueError(f"Duplicate channel name: {channel.name}")
             original_name = selected[0] if selected else channel.name
             updated = self._with_channel(channel, original_name)
             self._apply_running_configuration(updated)
@@ -425,6 +570,7 @@ class SourceApp(ttk.Frame):
         self.config = updated
         self._refresh_channels()
         self.tree.selection_set(channel.name)
+        self._remember_editor()
 
     def _remove(self) -> None:
         selected = self.tree.selection()
@@ -466,38 +612,82 @@ class SourceApp(ttk.Frame):
         channel = next((item for item in self.config.channels if item.name == selected[0]), None)
         if channel is None:
             return
-        self.name.set(channel.name)
-        self.capture_type.set(channel.capture_type)
-        self.capture_format.set(next(label for label, value in FORMAT_LABELS.items() if value == channel.format))
-        self._editor_window_identity = self._channel_window_identity(channel)
-        self._editor_window_title = channel.capture_target
-        self.capture_target.set(
-            self._window_label(channel.capture_target, self._editor_window_identity.handle)
-            if self._editor_window_identity else channel.capture_target
-        )
-        self.interval.set(str(channel.interval_ms))
-        self.video_fps.set(str(channel.video_fps))
-        self.full_frame_interval.set(str(channel.full_frame_interval_seconds))
-        self.quality.set(str(channel.quality))
-        self.enabled.set(channel.enabled)
-        self._capture_type_changed()
+        self._loading_editor = True
+        try:
+            self.name.set(channel.name)
+            self.capture_type.set(channel.capture_type)
+            self.capture_format.set(next(label for label, value in FORMAT_LABELS.items() if value == channel.format))
+            self._editor_window_identity = self._channel_window_identity(channel)
+            self._editor_window_title = channel.capture_target
+            self.capture_target.set(
+                self._window_label(channel.capture_target, self._editor_window_identity.handle)
+                if self._editor_window_identity else channel.capture_target
+            )
+            self.interval.set(str(channel.interval_ms))
+            self.video_fps.set(str(channel.video_fps))
+            self.full_frame_interval.set(str(channel.full_frame_interval_seconds))
+            self.quality.set(str(channel.quality))
+            self.enabled.set(channel.enabled)
+            self._capture_type_changed()
+            self._format_changed()
+            self.target_input.selection_clear()
+        finally:
+            self._loading_editor = False
+        self._remember_editor()
 
     def _clear_editor(self) -> None:
-        self.name.set("")
-        self.capture_type.set("screen")
-        self.capture_format.set("WEBP + PATCH")
-        self.capture_target.set("1")
-        self._editor_window_identity = None
-        self._editor_window_title = ""
-        self.interval.set("5000")
-        self.video_fps.set("15")
-        self.full_frame_interval.set("60")
-        self.quality.set("80")
-        self.enabled.set(True)
-        self.tree.selection_remove(self.tree.selection())
+        self._loading_editor = True
+        try:
+            self.name.set("")
+            self.capture_type.set("screen")
+            self.capture_format.set("WEBP + PATCH")
+            self.capture_target.set("1")
+            self._editor_window_identity = None
+            self._editor_window_title = ""
+            self.interval.set("5000")
+            self.video_fps.set("15")
+            self.full_frame_interval.set("60")
+            self.quality.set("80")
+            self.enabled.set(True)
+            self.tree.selection_remove(self.tree.selection())
+            self._capture_type_changed()
+            self._format_changed()
+            self.target_input.selection_clear()
+        finally:
+            self._loading_editor = False
+        self._remember_editor()
+
+    def _format_changed(self, _event: object = None) -> None:
+        capture_format = FORMAT_LABELS.get(self.capture_format.get())
+        is_video = capture_format == "video"
+        self.full_frame_label.configure(text="Keyframe (seconds)" if is_video else "Full frame (seconds)")
+        fields = (
+            (self.interval_label, self.interval_input, not is_video, 0, "ew"),
+            (self.video_fps_label, self.video_fps_input, is_video, 0, "w"),
+            (self.full_frame_label, self.full_frame_input, capture_format != "webp", 1, "ew"),
+            (self.quality_label, self.quality_input, True, 1 if capture_format == "webp" else 2, "w"),
+        )
+        for label, widget, visible, column, sticky in fields:
+            if visible:
+                label.grid(row=2, column=column, sticky="w", pady=(10, 0))
+                widget.grid(row=3, column=column, sticky=sticky, padx=(0, 12))
+            else:
+                label.grid_remove()
+                widget.grid_remove()
+        if hasattr(self, "update_button"):
+            self._editor_changed()
+
+    def _capture_type_selected(self, _event: object = None) -> None:
+        capture_type = self.capture_type.get()
+        if capture_type != self._editor_capture_type:
+            self.capture_target.set("1" if capture_type == "screen" else "")
+            self._editor_window_identity = None
+            self._editor_window_title = ""
         self._capture_type_changed()
+        self._editor_changed()
 
     def _capture_type_changed(self, _event: object = None) -> None:
+        self._editor_capture_type = self.capture_type.get()
         is_window = self.capture_type.get() == "window"
         self.refresh_windows_button.configure(state="normal" if is_window else "disabled")
         self.target_input.configure(state="readonly" if is_window else "normal")
@@ -506,6 +696,7 @@ class SourceApp(ttk.Frame):
         else:
             self._editor_window_identity = None
             self._editor_window_title = ""
+            self.target_input.configure(values=())
 
     def _refresh_windows(self, show_errors: bool = True) -> None:
         try:
@@ -551,6 +742,10 @@ class SourceApp(ttk.Frame):
             if show_errors:
                 messagebox.showerror("Window discovery", str(exc))
 
+    def _refresh_window_choices(self) -> None:
+        if self.capture_type.get() == "window":
+            self._refresh_windows()
+
     @staticmethod
     def _window_label(title: str, handle: int) -> str:
         return f"{title} [0x{handle:X}]"
@@ -569,15 +764,19 @@ class SourceApp(ttk.Frame):
         self._window_choices = {
             self._window_label(window.title, window.handle): window for window in windows
         }
-        self.target_input.configure(values=list(self._window_choices))
+        self.target_input.configure(
+            values=list(self._window_choices) if self.capture_type.get() == "window" else ()
+        )
 
     def _window_selected(self, _event: object = None) -> None:
+        self.target_input.selection_clear()
         if self.capture_type.get() != "window":
             return
         window = self._window_choices.get(self.capture_target.get())
         if window is None:
             self._editor_window_identity = None
             self._editor_window_title = ""
+            self._editor_changed()
             messagebox.showerror("Window selection", "Refresh and select an available window.")
             return
         try:
@@ -585,9 +784,11 @@ class SourceApp(ttk.Frame):
         except WindowDiscoveryError as exc:
             self._editor_window_identity = None
             self._editor_window_title = ""
+            self._editor_changed()
             messagebox.showerror("Window selection", str(exc))
             return
         self._editor_window_title = window.title
+        self._editor_changed()
 
     def _resolve_legacy_windows(self, config: SourceConfig) -> SourceConfig:
         channels = []
@@ -636,6 +837,7 @@ class SourceApp(ttk.Frame):
             save_config(self.config_path, updated)
             self._apply_running_configuration(updated)
             self.config = updated
+            self._remember_editor()
             if notify:
                 self.overall_status.set(f"Saved {self.config_path.name}")
             return True
@@ -651,7 +853,7 @@ class SourceApp(ttk.Frame):
     def _apply_selected_editor(self, update_running: bool = True) -> None:
         """Apply edits for the selected row before save/start/capture actions."""
         selected = self.tree.selection()
-        if not selected or not self.name.get().strip():
+        if not selected:
             return
         channel = self._channel_from_editor()
         original_name = selected[0]
@@ -662,6 +864,8 @@ class SourceApp(ttk.Frame):
         self._refresh_channels()
         if self.tree.exists(channel.name):
             self.tree.selection_set(channel.name)
+        if update_running:
+            self._remember_editor()
 
     def _start(self) -> None:
         if not self._save(notify=False):
@@ -746,11 +950,6 @@ class SourceApp(ttk.Frame):
         self.after(5000, self._check_window_titles)
 
     def _probe_window_titles(self, channels: list[tuple[str, WindowIdentity]]) -> None:
-        try:
-            windows = list_visible_windows()
-        except WindowDiscoveryError as exc:
-            self.window_events.put(([], [(name, identity, None, str(exc)) for name, identity in channels]))
-            return
         results = []
         for name, identity in channels:
             try:
@@ -758,7 +957,7 @@ class SourceApp(ttk.Frame):
                 results.append((name, identity, window.title or None, None))
             except WindowDiscoveryError as exc:
                 results.append((name, identity, None, str(exc)))
-        self.window_events.put((windows, results))
+        self.window_events.put(results)
 
     def _drain_events(self) -> None:
         self.send_bandwidth_value.set(f"{self.send_bandwidth.bytes_per_second * 8 / 1_000_000:.2f} Mbps")
@@ -781,8 +980,7 @@ class SourceApp(ttk.Frame):
             pass
         try:
             while True:
-                windows, results = self.window_events.get_nowait()
-                self._set_window_choices(windows)
+                results = self.window_events.get_nowait()
                 titles = {name: (identity, title, error) for name, identity, title, error in results}
                 updated_channels = []
                 for channel in self.config.channels:

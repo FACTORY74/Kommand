@@ -12,6 +12,29 @@ from typing import Any
 CHANNEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+def parse_screen_target(target: str) -> int:
+    try:
+        index = int(target)
+    except ValueError as exc:
+        raise ValueError(
+            "Screen target must be a non-negative monitor number; "
+            "select window as the type to capture an application window."
+        ) from exc
+    if index < 0:
+        raise ValueError("Screen target must be a non-negative monitor number.")
+    return index
+
+
+def parse_region_target(target: str) -> tuple[int, int, int, int]:
+    try:
+        left, top, width, height = (int(value.strip()) for value in target.split(","))
+    except ValueError as exc:
+        raise ValueError("Region target must be left,top,width,height.") from exc
+    if width <= 0 or height <= 0:
+        raise ValueError("Region width and height must be positive.")
+    return left, top, width, height
+
+
 @dataclass(slots=True)
 class ChannelConfig:
     name: str
