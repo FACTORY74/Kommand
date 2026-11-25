@@ -5,7 +5,7 @@ control-room display. **Kommand Source** captures named screen or window
 channels and sends them to **Kommand Central**, where you arrange them into a
 resizable, fullscreen-capable grid.
 
-[![Kommand Central displaying multiple captured channels](./_progress/2026-11-21.png)](./_progress/2026-11-21.png)
+[![Kommand Central displaying multiple captured channels](./_progress/2026-11-25.png)](./_progress/2026-11-25.png)
 
 *Central displaying a multi-channel layout.*
 
@@ -53,7 +53,7 @@ Select **Start server**, then **Open display**. Central listens on port `8000`
 by default. The display is a local Tkinter window; use **Fullscreen** or F11 to
 toggle fullscreen and Escape to leave it.
 
-[![Kommand Central server and layout controls](./_progress/2026-11-21%20-%20Central.png)](./_progress/2026-11-21%20-%20Central.png)
+[![Kommand Central server and layout controls](./_progress/2026-11-25%20-%20Central.png)](./_progress/2026-11-25%20-%20Central.png)
 
 ### 2. Configure a Source
 
@@ -70,7 +70,7 @@ The default format is **WEBP + PATCH**. Choose **WEBP** for full frames or
 **VIDEO** for H.264, with a separate target frame rate (15 fps by default).
 Video carries images only, not audio. Update Source and Central together.
 
-[![Kommand Source connection and channel controls](./_progress/2026-11-21%20-%20Source.png)](./_progress/2026-11-21%20-%20Source.png)
+[![Kommand Source connection and channel controls](./_progress/2026-11-25%20-%20Source.png)](./_progress/2026-11-25%20-%20Source.png)
 
 ### 3. Arrange the display
 
