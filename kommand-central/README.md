@@ -16,9 +16,27 @@ Central machine. Configure Source with Central's LAN address and port.
 Server and application logs, including HTTP access requests, are written to
 `kommand-central/logs/central.log` rather than the command line. Logs rotate at
 5 MiB, retaining up to five older files (`central.log.1` through
-`central.log.5`). If the server cannot start, the status points to the log.
+`central.log.5`). If the server cannot start, check this log for details.
 
 ## Layouts
+
+Drag the horizontal divider between **Display Layout** and **Live Channels** up
+or down to resize the two sections. The divider is a thin line separated from
+the panel borders by 12 pixels of window-background spacing on each side.
+The preview resizes as you drag; both
+sections retain a minimum height so they remain usable.
+
+Display Layout has a tab for each output window. Use **+** to add an independent
+layout, edit **Window name** to rename its tab and display, and use **Open display**
+to open that tab's window. Tabs keep the same height when selected or hovered.
+Other display windows stay open when changing tabs;
+move each window to its monitor and use F11 for fullscreen. **Delete window** beside
+**Remove nesting** asks for confirmation before removing the active tab and closing its display window.
+Closing all tabs leaves **+** available to create a new one.
+
+The window list is saved in `windows.json`. The original layout stays in
+`layout.json`; additional layouts use `layout-<id>.json`. Removing a tab retains
+its layout file for recovery, but removes it from the saved window list.
 
 Central starts with a 2×2 root grid. Set the root rows and columns and select
 **Apply root grid** to replace it. Select a leaf panel to assign a live
@@ -42,6 +60,9 @@ and Escape to exit it. On Windows, fullscreen uses the monitor containing most
 of the display window and restores its previous position and size on exit.
 Layout configuration is saved atomically to
 `kommand-central/layout.json`.
+Each save uses a unique temporary file and briefly retries replacement when
+Windows reports an access or sharing lock. Persistent failures are still
+reported without overwriting the existing file.
 
 This first vertical slice keeps only the latest frame per channel in memory.
 Frames disappear when Central restarts.

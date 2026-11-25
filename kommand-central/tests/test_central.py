@@ -302,6 +302,54 @@ class CentralTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["layout"]["type"], "grid")
 
+    def test_panel_view_save_retries_temporary_windows_replacement_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            layouts = LayoutStore(path)
+            layouts.assign((0,), "source/main")
+            view = Viewport(2.0, 0.1, -0.2)
+            error = PermissionError("Temporary Windows lock")
+            error.winerror = 5
+            replace = Path.replace
+            attempts = []
+
+            def locked_replace(temporary, destination):
+                attempts.append(temporary)
+                if len(attempts) < 3:
+                    raise error
+                return replace(temporary, destination)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=locked_replace):
+                with patch("kommand_central.layout.time.sleep") as sleep:
+                    layouts.set_view((0,), view, layouts.revision)
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(LayoutStore(path).leaves()[0][1].view, view)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_panel_view_save_failure_preserves_disk_and_memory_and_cleans_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.json"
+            layouts = LayoutStore(path)
+            layouts.assign((0,), "source/main")
+            snapshot = layouts.snapshot()
+            revision = layouts.revision
+            for windows_error, expected_attempts in ((5, 6), (32, 6), (33, 6), (None, 1)):
+                with self.subTest(windows_error=windows_error):
+                    error = PermissionError("Access denied")
+                    if windows_error is not None:
+                        error.winerror = windows_error
+                    with patch.object(Path, "replace", side_effect=error) as replace:
+                        with patch("kommand_central.layout.time.sleep") as sleep:
+                            with self.assertRaises(PermissionError):
+                                layouts.set_view((0,), Viewport(2.0), revision)
+                    self.assertEqual(replace.call_count, expected_attempts)
+                    self.assertEqual(sleep.call_count, expected_attempts - 1)
+                    self.assertEqual(layouts.snapshot(), snapshot)
+                    self.assertEqual(layouts.revision, revision)
+                    self.assertEqual(LayoutStore(path).snapshot(), snapshot)
+                    self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
     def test_existing_zoomed_out_views_migrate_to_fit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "layout.json"

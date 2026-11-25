@@ -38,8 +38,9 @@ def apply_theme(master: tk.Tk) -> None:
         font=("Segoe UI Semibold", 18),
     )
     style.configure("Status.TLabel", background=colors["surface_high"], foreground=colors["text"], padding=(12, 7), font=("Segoe UI Semibold", 9))
-    style.configure("Card.TLabelframe", background=colors["surface"], bordercolor=colors["border"], relief="solid", borderwidth=1)
-    style.configure("Card.TLabelframe.Label", background=colors["surface"], foreground=colors["primary"], font=("Segoe UI Semibold", 9))
+    style.configure("Card.TLabelframe", background=colors["background"], bordercolor=colors["border"], relief="solid", borderwidth=1)
+    style.configure("Card.TLabelframe.Label", background=colors["background"], foreground=colors["primary"], font=("Segoe UI Semibold", 9))
+    _install_card_fill(master, style)
     style.configure("TEntry", fieldbackground=colors["surface_high"], foreground=colors["text"], insertcolor=colors["text"], bordercolor=colors["border"], lightcolor=colors["border"], darkcolor=colors["border"], padding=(9, 7))
     style.map("TEntry", bordercolor=[("focus", colors["primary"])], lightcolor=[("focus", colors["primary"])], darkcolor=[("focus", colors["primary"])])
     style.configure(
@@ -74,6 +75,20 @@ def apply_theme(master: tk.Tk) -> None:
     style.map("Stepper.TButton", background=[("active", colors["selection"]), ("pressed", colors["primary_pressed"]), ("disabled", colors["surface"])], foreground=[("disabled", colors["muted"])])
     style.configure("Stepper.TEntry", fieldbackground=colors["surface"], foreground=colors["text"], borderwidth=0, padding=(8, 9), font=("Segoe UI Semibold", 10))
     style.map("Stepper.TEntry", fieldbackground=[("focus", colors["surface_high"])])
+
+
+def _install_card_fill(master: tk.Tk, style: ttk.Style) -> None:
+    element = "Kommand.Card.fill"
+    if element not in style.element_names():
+        # A larger tile avoids excessive image draws when panels expand.
+        image = tk.PhotoImage(master=master, width=64, height=64)
+        image.put(COLORS["surface"], to=(0, 0, 64, 64))
+        master._kommand_card_fill_image = image  # type: ignore[attr-defined]
+        style.element_create(element, "image", image, border=1, sticky="nswe")
+    # Keep the interior fill independent of the background above the border.
+    style.layout("Card.TLabelframe", [
+        ("Labelframe.border", {"sticky": "nswe", "children": [(element, {"sticky": "nswe"})]}),
+    ])
 
 
 def _install_combobox_arrow(master: tk.Tk, style: ttk.Style) -> None:

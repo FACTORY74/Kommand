@@ -303,6 +303,122 @@ class DisplayTests(unittest.TestCase):
         window._refresh()
         self.assertEqual(window._slots[4].name.cget("text"), "Panel 4 / Unassigned")
 
+    def test_divider_drag_resizes_layout_and_channels_without_hiding_controls(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        with patch("kommand_central.ui.LayoutStore", return_value=LayoutStore()):
+            app = CentralApp(root)
+        root.geometry("1400x1000")
+        root.update()
+        splitter = app.view_splitter
+
+        def drag(delta: int) -> None:
+            x, y = splitter.sash_coord(0)
+            x += 40
+            y += int(splitter.cget("sashwidth")) // 2
+            splitter.event_generate("<ButtonPress-1>", x=x, y=y)
+            splitter.event_generate("<B1-Motion>", x=x, y=y + delta)
+            splitter.event_generate("<ButtonRelease-1>", x=x, y=y + delta)
+            root.update()
+
+        preview_height = app.layout_canvas.winfo_height()
+        channels_height = app.channels_tree.winfo_height()
+        drag(60)
+        self.assertGreater(app.layout_canvas.winfo_height(), preview_height)
+        self.assertLess(app.channels_tree.winfo_height(), channels_height)
+        drag(-60)
+        self.assertAlmostEqual(app.layout_canvas.winfo_height(), preview_height, delta=2)
+        self.assertAlmostEqual(app.channels_tree.winfo_height(), channels_height, delta=2)
+
+        for geometry in ("1400x1000", "900x700"):
+            root.geometry(geometry)
+            root.update()
+            for delta in (0, -2000, 2000):
+                drag(delta)
+                for pane in splitter.panes():
+                    minimum = int(splitter.panecget(pane, "minsize"))
+                    self.assertGreaterEqual(root.nametowidget(str(pane)).winfo_height(), minimum)
+                self.assertGreater(app.layout_canvas.winfo_height(), 0)
+                self.assertGreater(app.channels_tree.winfo_height(), 0)
+                self.assertTrue(app.window_name_input.winfo_ismapped())
+                self.assertTrue(app.assignment_input.winfo_ismapped())
+
+    def test_live_channel_drop_assigns_nested_panel_and_outside_drop_is_ignored(self) -> None:
+        from types import SimpleNamespace
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        layouts = LayoutStore()
+        layouts.nest((0,), 1, 2)
+        with patch("kommand_central.ui.LayoutStore", return_value=layouts):
+            app = CentralApp(root)
+        root.update_idletasks()
+        app._refresh_layout_tree()
+        app.channels_tree.insert("", "end", iid="machine/test", values=("machine/test", "50 × 50", 1, "now"))
+        root.geometry("1100x1000")
+        root.update()
+        app._draw_layout()
+        with patch.object(app.channels_tree, "identify_row", return_value="machine/test"):
+            app._channel_drag_start(SimpleNamespace(y=5))
+        left, top, right, bottom = app._panel_boxes[(0, 1)]
+        event = SimpleNamespace(
+            x_root=int(app.layout_canvas.winfo_rootx() + (left + right) / 2),
+            y_root=int(app.layout_canvas.winfo_rooty() + (top + bottom) / 2),
+        )
+        app._channel_drag_motion(event)
+        self.assertEqual(app._drop_panel, (0, 1))
+        app._channel_drag_release(event)
+        self.assertEqual(dict(layouts.leaves())[(0, 1)].channel, "machine/test")
+        app._mini_zoom(event, 1)
+        self.assertAlmostEqual(dict(layouts.leaves())[(0, 1)].view.zoom, 1.2)
+        before = dict(layouts.leaves())[(0, 1)].view
+        app._select_panel(event)
+        app._pan_motion(SimpleNamespace(x_root=event.x_root + 10, y_root=event.y_root + 5))
+        app._pan_release()
+        after = dict(layouts.leaves())[(0, 1)].view
+        self.assertGreater(after.pan_x, before.pan_x)
+        self.assertGreater(after.pan_y, before.pan_y)
+        self.assertEqual(after.zoom, before.zoom)
+        with patch.object(app, "_show_source_menu") as menu:
+            app._select_panel(event)
+            menu.assert_not_called()
+            app._pan_release(event)
+            menu.assert_called_once_with(event)
+        layouts.assign((1,), "machine/other")
+        app._refresh_layout_tree()
+        left, top, right, bottom = app._panel_boxes[(1,)]
+        destination = SimpleNamespace(
+            x_root=int(app.layout_canvas.winfo_rootx() + (left + right) / 2),
+            y_root=int(app.layout_canvas.winfo_rooty() + (top + bottom) / 2),
+        )
+        app._select_panel(event)
+        app._pan_motion(destination)
+        self.assertEqual(app._drop_panel, (1,))
+        app._pan_release(destination)
+        self.assertEqual(dict(layouts.leaves())[(1,)].channel, "machine/test")
+        self.assertEqual(dict(layouts.leaves())[(0, 1)].channel, "machine/other")
+        left, top, right, bottom = app._panel_boxes[(2,)]
+        empty = SimpleNamespace(
+            x_root=int(app.layout_canvas.winfo_rootx() + (left + right) / 2),
+            y_root=int(app.layout_canvas.winfo_rooty() + (top + bottom) / 2),
+        )
+        app._select_panel(destination)
+        app._pan_motion(empty)
+        app._pan_release(empty)
+        self.assertIsNone(dict(layouts.leaves())[(1,)].channel)
+        self.assertEqual(dict(layouts.leaves())[(2,)].channel, "machine/test")
+        revision = layouts.revision
+        with patch.object(app.channels_tree, "identify_row", return_value="machine/test"):
+            app._channel_drag_start(SimpleNamespace(y=5))
+        app._channel_drag_release(SimpleNamespace(x_root=-1000, y_root=-1000))
+        self.assertEqual(layouts.revision, revision)
+
     def test_drag_moves_and_swaps_and_updates_central_tree(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -340,23 +456,28 @@ class DisplayTests(unittest.TestCase):
                 origin.label.event_generate("<ButtonRelease-1>", x=5, y=5, rootx=x, rooty=y)
             root.update()
 
+        def canvas_labels() -> list[str]:
+            return [app.layout_canvas.itemcget(item, "text") for item in app.layout_canvas.find_all()
+                    if app.layout_canvas.type(item) == "text"]
+
         def wait_for_assignment(item: str, assignment: str) -> None:
+            label = "Panel " + ".".join(str(int(part) + 1) for part in item.split("."))
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 root.update()
-                if app.layout_tree.exists(item) and app.layout_tree.item(item, "values")[1] == assignment:
+                if f"{label} · {assignment}" in canvas_labels():
                     return
                 time.sleep(0.01)
             self.fail(f"Central tree did not show {item} as {assignment}")
 
         drag((0,), (3, 0))
         wait_for_assignment("3.0", "source/main")
-        self.assertEqual(app.layout_tree.item("0", "values")[1], "Unassigned")
+        self.assertIn("Panel 1 · Unassigned", canvas_labels())
         self.assertEqual(find((3, 0)).name.cget("text"), "Panel 4.1 / source/main")
 
         drag((3, 0), (2,))
         wait_for_assignment("2", "source/main")
-        self.assertEqual(app.layout_tree.item("3.0", "values")[1], "source/other")
+        self.assertIn("Panel 4.1 · source/other", canvas_labels())
         self.assertEqual(LayoutStore(path).snapshot(), layouts.snapshot())
 
         revision = layouts.revision

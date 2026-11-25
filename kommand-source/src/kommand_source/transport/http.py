@@ -27,6 +27,27 @@ class CentralConnectionError(RuntimeError):
     """Central's health endpoint could not be reached successfully."""
 
 
+def _error_explanation(error: Exception) -> str:
+    """Keep transport wrappers and request URLs out of the status table."""
+    seen: set[int] = set()
+    while id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, requests.HTTPError) and error.response is not None:
+            return f"HTTP {error.response.status_code}: {error.response.reason}"
+        nested = (
+            error.__cause__
+            or getattr(error, "reason", None)
+            or next((arg for arg in error.args if isinstance(arg, Exception)), None)
+            or error.__context__
+        )
+        if not isinstance(nested, Exception) or id(nested) in seen:
+            break
+        error = nested
+    message = getattr(error, "strerror", None) or str(error)
+    message = " ".join(message.split()) or type(error).__name__
+    return message if len(message) <= 200 else message[:197] + "..."
+
+
 class _MeasuredBody(BytesIO):
     def __init__(self, content: bytes, bandwidth: RollingBandwidth) -> None:
         super().__init__(content)
@@ -55,7 +76,7 @@ def check_central_connection(central_url: str, timeout: float = 3.0) -> None:
         response = requests.get(url, timeout=timeout)
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise CentralConnectionError(str(exc)) from exc
+        raise CentralConnectionError(_error_explanation(exc)) from exc
 
 
 class CentralClient:
@@ -204,7 +225,7 @@ class CentralClient:
                 raise ValueError("Invalid Central revision response")
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             self._reset()
-            raise UploadError(str(exc)) from exc
+            raise UploadError(_error_explanation(exc)) from exc
         return result
 
     def _reset(self) -> None:

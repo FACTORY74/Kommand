@@ -38,10 +38,25 @@ cleared whenever the application starts. The Central connection panel shows
 outgoing request-body bandwidth across all channels as a five-second rolling
 average in Mbps. It includes multipart upload overhead but excludes HTTP headers
 and network protocol overhead.
+Each channel row shows a 50-pixel preview of its latest diagnostic frame. The
+preview is checked once per second; a capture error replaces it with a large X
+until that channel captures successfully again.
 Video channels refresh their diagnostic WebP image at most once per second.
 
 Source defaults `OPENBLAS_NUM_THREADS` to `1` before loading the window-capture
 backend, avoiding an unused numerical thread pool. An existing setting is respected.
+
+## Logs
+
+Capture failures, upload errors, Central connection-check failures, and uncaught
+application or worker exceptions are written to `kommand-source/logs/source.log`.
+Entries include timestamps, thread names, channel names for capture/upload
+errors, and exception tracebacks when available. The channel table and connection
+indicator continue to show their existing error status.
+
+Logs rotate at 5 MiB, retaining up to five older files (`source.log.1` through
+`source.log.5`). Logs are retained when Source restarts; only diagnostic images
+in `debug/` are cleared.
 
 ## Capture targets
 
@@ -62,6 +77,8 @@ Existing `region` channels remain supported, but cannot be selected for new
 channels in the UI.
 
 Channels can be added, updated, disabled, or removed while capture is running.
+On startup, the first channel in the displayed list is selected and its settings
+are loaded into the editor. With no configured channels, the editor stays empty.
 Choose **New** to clear the editor, then **Update** to add the channel. For an
 existing channel, **Update** is enabled when its fields change. Invalid fields
 are highlighted red. Changes apply when **Update** or **Remove** is clicked;

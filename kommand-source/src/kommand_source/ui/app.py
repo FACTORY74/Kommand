@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import logging
 import queue
+import sys
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import messagebox, ttk
+
+from PIL import Image, ImageDraw, ImageOps, ImageTk
+import mss
 
 from kommand_source.config import (
     CHANNEL_NAME_PATTERN, ChannelConfig, SourceConfig, parse_region_target, parse_screen_target, save_config,
@@ -57,6 +63,7 @@ class SourceApp(ttk.Frame):
         self.master = master
         self.config = config
         self.config_path = config_path
+        self.debug_store = debug_store
         self.events: queue.Queue[tuple[str, str, str]] = queue.Queue()
         self.send_bandwidth = RollingBandwidth()
         self.runner = SourceRunner(debug_store, self._post_status, self.send_bandwidth)
@@ -88,6 +95,8 @@ class SourceApp(ttk.Frame):
         ] = queue.Queue()
         self.window_check_thread: threading.Thread | None = None
         self._window_choices: dict[str, WindowInfo] = {}
+        self._screen_choices: dict[str, str] = {}
+        self._result_details: dict[str, str] = {}
         self._editor_window_identity: WindowIdentity | None = None
         self._editor_window_title = ""
         self._editor_capture_type = "screen"
@@ -95,6 +104,9 @@ class SourceApp(ttk.Frame):
         self._editor_baseline: tuple[object, ...] = ()
         self._stopping = False
         self._closing = False
+        self._preview_images: dict[str, ImageTk.PhotoImage] = {}
+        self._preview_files: dict[str, tuple[Path, int, int]] = {}
+        self._broken_preview: ImageTk.PhotoImage | None = None
 
         self._build()
         self._refresh_channels()
@@ -106,9 +118,16 @@ class SourceApp(ttk.Frame):
             variable.trace_add("write", self._editor_changed)
         self.source_name.trace_add("write", self._connection_changed)
         self.central_url.trace_add("write", self._connection_changed)
+        rows = self.tree.get_children()
+        if rows:
+            self.tree.selection_set(rows[0])
+            self.tree.focus(rows[0])
+            self.tree.see(rows[0])
+            self._select_channel()
         self._editor_changed()
         self._connection_changed()
         self.after(100, self._drain_events)
+        self.after(0, self._refresh_previews)
         self.after(0, self._check_central_connection)
         self.after(0, self._check_window_titles)
 
@@ -119,14 +138,17 @@ class SourceApp(ttk.Frame):
 
         connection = card(self, "Central connection")
         connection.pack(fill="x")
-        self.source_name_input = self._entry(connection, "Source name", self.source_name, 0, 0)
+        self.source_name_input = self._entry(connection, "Machine Name", self.source_name, 0, 0)
         self.central_url_input = self._entry(connection, "Central URL", self.central_url, 0, 2, width=38)
         ttk.Label(connection, text="Connection status").grid(row=0, column=4, sticky="w")
-        ttk.Label(
+        self.connection_status_label = ttk.Label(
             connection,
             textvariable=self.connection_status,
-            style="Status.TLabel",
-        ).grid(row=1, column=4, sticky="w")
+            style="ConnectionNeutral.Status.TLabel",
+            width=len("Not contactable"),
+            anchor="center",
+        )
+        self.connection_status_label.grid(row=1, column=4, sticky="w")
         ttk.Label(connection, text="Send bandwidth").grid(row=0, column=5, sticky="w", padx=(12, 0))
         ttk.Label(
             connection,
@@ -141,23 +163,51 @@ class SourceApp(ttk.Frame):
 
         self.tree = ttk.Treeview(
             channels,
-            columns=("type", "target", "interval", "status", "detail"),
+            columns=("channel", "type", "target", "status", "detail"),
             show="tree headings",
             height=8,
+            style="Source.Treeview",
         )
-        self.tree.heading("#0", text="Channel")
-        for key, label, width in (
-            ("type", "Type", 65),
-            ("target", "Target", 230),
-            ("interval", "Interval", 70),
-            ("status", "Status", 75),
-            ("detail", "Last result", 180),
+        # A 64-pixel row leaves a comfortable gutter around the 50-pixel preview.
+        ttk.Style(self.master).configure("Source.Treeview", rowheight=64)
+        self.tree.heading("#0", text="Preview")
+        for key, label, width, minimum, stretch in (
+            ("channel", "Channel", 120, 100, False),
+            ("type", "Type", 80, 70, False),
+            ("target", "Target", 230, 140, True),
+            ("status", "Status", 95, 85, False),
+            ("detail", "Last result", 190, 140, True),
         ):
             self.tree.heading(key, text=label)
-            self.tree.column(key, width=width)
-        self.tree.column("#0", width=110)
+            self.tree.column(key, width=width, minwidth=minimum, stretch=stretch, anchor="w")
+        self.tree.column("channel", anchor="center")
+        self.tree.column("status", anchor="center")
+        self.tree.column("detail", anchor="center")
+        self.tree.column("#0", width=76, minwidth=76, stretch=False, anchor="center")
         self.tree.grid(row=0, column=0, columnspan=6, sticky="nsew")
+        scrollbar_style = ttk.Style(self.master)
+        scrollbar_style.configure(
+            "Source.Vertical.TScrollbar",
+            troughcolor=self.COLORS["background"],
+            background=self.COLORS["border"],
+            bordercolor=self.COLORS["surface_high"],
+            lightcolor=self.COLORS["border"],
+            darkcolor=self.COLORS["border"],
+            arrowcolor=self.COLORS["muted"],
+        )
+        scrollbar_style.map(
+            "Source.Vertical.TScrollbar",
+            background=[("pressed", self.COLORS["primary"]), ("active", "#465568")],
+            arrowcolor=[("active", self.COLORS["text"])],
+        )
+        self.channels_scrollbar = ttk.Scrollbar(
+            channels, orient="vertical", command=self.tree.yview, style="Source.Vertical.TScrollbar",
+        )
+        self.channels_scrollbar.grid(row=0, column=6, sticky="ns")
+        self.tree.configure(yscrollcommand=self.channels_scrollbar.set)
         self.tree.bind("<<TreeviewSelect>>", self._select_channel)
+        self.tree.bind("<Configure>", self._wrap_results)
+        self.tree.bind("<ButtonRelease-1>", self._wrap_results, add="+")
 
         editor = ttk.Frame(channels, padding=(0, 10, 0, 0))
         editor.grid(row=1, column=0, columnspan=6, sticky="ew")
@@ -425,6 +475,33 @@ class SourceApp(ttk.Frame):
             "Source.Stepper.TEntry",
             fieldbackground=[("invalid", red_background), ("focus", self.COLORS["surface_high"])],
         )
+        status_options = {
+            "padding": (12, 7),
+            "font": ("Segoe UI Semibold", 9),
+        }
+        style.configure(
+            "ConnectionNeutral.Status.TLabel",
+            background=self.COLORS["surface_high"], foreground=self.COLORS["muted"], **status_options,
+        )
+        style.configure(
+            "ConnectionGood.Status.TLabel",
+            background="#183A2B", foreground="#63D995", **status_options,
+        )
+        style.configure(
+            "ConnectionBad.Status.TLabel",
+            background="#512730", foreground=self.COLORS["danger"], **status_options,
+        )
+
+    def _set_connection_status(self, status: str) -> None:
+        normalized = status.strip().casefold()
+        if normalized == "not contactable":
+            style = "ConnectionBad.Status.TLabel"
+        elif normalized == "contactable" or normalized.startswith("running"):
+            style = "ConnectionGood.Status.TLabel"
+        else:
+            style = "ConnectionNeutral.Status.TLabel"
+        self.connection_status.set(status)
+        self.connection_status_label.configure(style=style)
 
     def _editor_values(self) -> tuple[object, ...]:
         target: object = self.capture_target.get().strip()
@@ -745,6 +822,19 @@ class SourceApp(ttk.Frame):
     def _refresh_window_choices(self) -> None:
         if self.capture_type.get() == "window":
             self._refresh_windows()
+        elif self.capture_type.get() == "screen":
+            try:
+                with mss.mss() as capturer:
+                    self._screen_choices = {
+                        f"{index} — {'Combined desktop' if index == 0 else 'Screen ' + str(index)} "
+                        f"({monitor['width']} × {monitor['height']})": str(index)
+                        for index, monitor in enumerate(capturer.monitors)
+                    }
+                self.target_input.configure(values=list(self._screen_choices))
+            except Exception as exc:
+                self._screen_choices = {}
+                self.target_input.configure(values=())
+                messagebox.showerror("Screen discovery", str(exc))
 
     @staticmethod
     def _window_label(title: str, handle: int) -> str:
@@ -770,6 +860,12 @@ class SourceApp(ttk.Frame):
 
     def _window_selected(self, _event: object = None) -> None:
         self.target_input.selection_clear()
+        if self.capture_type.get() == "screen":
+            target = self._screen_choices.get(self.capture_target.get())
+            if target is not None:
+                self.capture_target.set(target)
+            self._editor_changed()
+            return
         if self.capture_type.get() != "window":
             return
         window = self._window_choices.get(self.capture_target.get())
@@ -807,25 +903,102 @@ class SourceApp(ttk.Frame):
         return replace(config, channels=channels)
 
     def _refresh_channels(self) -> None:
-        existing = {item: self.tree.item(item, "values") for item in self.tree.get_children()}
+        existing = {
+            item: (self.tree.set(item, "status"), self.tree.set(item, "detail"))
+            for item in self.tree.get_children()
+        }
         self.tree.delete(*self.tree.get_children())
-        for channel in self.config.channels:
+        for channel in sorted(self.config.channels, key=lambda channel: (channel.name.casefold(), channel.name)):
             previous = existing.get(channel.name, ())
-            status = previous[3] if len(previous) > 3 else ("Ready" if channel.enabled else "Disabled")
-            detail = previous[4] if len(previous) > 4 else ""
+            status = previous[0] if previous else ("Ready" if channel.enabled else "Disabled")
+            detail = previous[1] if previous else ""
             self.tree.insert(
                 "",
                 "end",
                 iid=channel.name,
-                text=channel.name,
+                text="",
+                image=self._preview_images.get(channel.name, ""),
                 values=(
+                    channel.name,
                     channel.capture_type,
                     channel.capture_target,
-                    channel.interval_ms,
                     status,
                     detail,
                 ),
             )
+
+    def _wrap_results(self, _event: object = None) -> None:
+        style = ttk.Style(self.master)
+        font = tkfont.Font(root=self.master, font=style.lookup("Source.Treeview", "font"))
+        available = max(20, int(self.tree.column("detail", "width")) - 16)
+        row_height = 64
+        for name in self.tree.get_children():
+            text = self._result_details.get(name, self.tree.set(name, "detail"))
+            lines = []
+            for paragraph in text.splitlines() or [""]:
+                line = ""
+                for character in paragraph:
+                    if line and font.measure(line + character) > available:
+                        lines.append(line)
+                        line = ""
+                    line += character
+                lines.append(line)
+            self.tree.set(name, "detail", "\n".join(lines))
+            row_height = max(row_height, len(lines) * font.metrics("linespace") + 12)
+        style.configure("Source.Treeview", rowheight=row_height)
+
+    def _broken_preview_image(self) -> ImageTk.PhotoImage:
+        if self._broken_preview is None:
+            image = Image.new("RGB", (50, 50), self.COLORS["surface_high"])
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((0, 0, 49, 49), outline=self.COLORS["danger"], width=2)
+            draw.line((11, 11, 39, 39), fill=self.COLORS["danger"], width=6)
+            draw.line((39, 11, 11, 39), fill=self.COLORS["danger"], width=6)
+            self._broken_preview = ImageTk.PhotoImage(image, master=self.master)
+        return self._broken_preview
+
+    def _latest_preview_file(self, channel_name: str) -> Path | None:
+        directory = getattr(self.debug_store, "directory", None)
+        if not isinstance(directory, Path) or not directory.exists():
+            return None
+        try:
+            files = [path for path in directory.glob(f"{channel_name}.*") if path.is_file()]
+            return max(files, key=lambda path: path.stat().st_mtime_ns, default=None)
+        except OSError:
+            return None
+
+    def _refresh_previews(self) -> None:
+        """Refresh each row's diagnostic thumbnail once per second."""
+        active_names = {channel.name for channel in self.config.channels}
+        for stale_name in self._preview_images.keys() - active_names:
+            self._preview_images.pop(stale_name, None)
+            self._preview_files.pop(stale_name, None)
+
+        for channel in self.config.channels:
+            if not self.tree.exists(channel.name):
+                continue
+            if self.tree.set(channel.name, "status") == "Error":
+                self.tree.item(channel.name, image=self._broken_preview_image())
+                continue
+            path = self._latest_preview_file(channel.name)
+            if path is None:
+                continue
+            try:
+                stat = path.stat()
+                signature = (path, stat.st_mtime_ns, stat.st_size)
+                if self._preview_files.get(channel.name) != signature:
+                    with Image.open(path) as source:
+                        thumbnail = ImageOps.pad(
+                            source.convert("RGB"), (50, 50), Image.Resampling.LANCZOS,
+                            color=self.COLORS["surface_high"],
+                        )
+                    self._preview_images[channel.name] = ImageTk.PhotoImage(thumbnail, master=self.master)
+                    self._preview_files[channel.name] = signature
+                self.tree.item(channel.name, image=self._preview_images[channel.name])
+            except (OSError, ValueError):
+                # A writer may replace a file between discovery and decoding; retry next tick.
+                pass
+        self.after(1000, self._refresh_previews)
 
     def _save(self, notify: bool = True) -> bool:
         previous_config = self.config
@@ -853,7 +1026,7 @@ class SourceApp(ttk.Frame):
     def _apply_selected_editor(self, update_running: bool = True) -> None:
         """Apply edits for the selected row before save/start/capture actions."""
         selected = self.tree.selection()
-        if not selected:
+        if not selected or self._editor_values() == self._editor_baseline:
             return
         channel = self._channel_from_editor()
         original_name = selected[0]
@@ -905,18 +1078,24 @@ class SourceApp(ttk.Frame):
         def work() -> None:
             try:
                 self.runner.capture_once(config, replace(channel))
-            except Exception as exc:
-                self._post_status(channel.name, "Error", str(exc))
+            except Exception:
+                # The runner reports capture and upload failures separately.
+                pass
 
         threading.Thread(target=work, name="capture-once", daemon=True).start()
 
     def _post_status(self, channel: str, status: str, detail: str) -> None:
+        if status in ("Error", "Upload error"):
+            logging.getLogger(__name__).error(
+                "Channel %s %s: %s", channel, status, detail,
+                exc_info=sys.exc_info()[0] is not None,
+            )
         self.events.put((channel, status, detail))
 
     def _check_central_connection(self) -> None:
         if not self.connection_check_running:
             central_url = self.central_url.get().strip()
-            self.connection_status.set("Checking…")
+            self._set_connection_status("Checking…")
             self.connection_check_running = True
             threading.Thread(
                 target=self._probe_central_connection,
@@ -930,6 +1109,7 @@ class SourceApp(ttk.Frame):
         try:
             check_central_connection(central_url)
         except CentralConnectionError:
+            logging.getLogger(__name__).warning("Central connection check failed", exc_info=True)
             status = "Not contactable"
         else:
             status = "Contactable"
@@ -961,21 +1141,26 @@ class SourceApp(ttk.Frame):
 
     def _drain_events(self) -> None:
         self.send_bandwidth_value.set(f"{self.send_bandwidth.bytes_per_second * 8 / 1_000_000:.2f} Mbps")
+        results_changed = False
         try:
             while True:
                 channel, status, detail = self.events.get_nowait()
                 if self.tree.exists(channel):
-                    values = list(self.tree.item(channel, "values"))
-                    values[3:5] = [status, detail]
-                    self.tree.item(channel, values=values)
+                    results_changed = results_changed or self._result_details.get(channel) != detail
+                    self.tree.set(channel, "status", status)
+                    self._result_details[channel] = detail
+                    if status == "Error":
+                        self.tree.item(channel, image=self._broken_preview_image())
         except queue.Empty:
             pass
+        if results_changed:
+            self._wrap_results()
         try:
             while True:
                 central_url, status = self.connection_events.get_nowait()
                 self.connection_check_running = False
                 if central_url == self.central_url.get().strip():
-                    self.connection_status.set(status)
+                    self._set_connection_status(status)
         except queue.Empty:
             pass
         try:

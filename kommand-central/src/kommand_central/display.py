@@ -122,7 +122,7 @@ class DisplayWindow(tk.Toplevel):
         self._refresh_job: str | None = None
         self._windowed_bounds: tuple[int, int, int, int] | None = None
         self._windowed_state = "normal"
-        self.title("Kommand Central display")
+        self.title(self.layouts.window_name)
         self.geometry("1280x720")
         self.configure(background=COLORS["background"])
         self.bind("<F11>", self._toggle_fullscreen)
@@ -132,10 +132,11 @@ class DisplayWindow(tk.Toplevel):
         self.bind("<Button-5>", lambda event: self._zoom(event, -1))
         header = tk.Frame(self, background=COLORS["background"])
         header.pack(fill="x")
-        tk.Label(
-            header, text="Kommand Central display", foreground=COLORS["text"],
+        self.title_label = tk.Label(
+            header, text=self.layouts.window_name, foreground=COLORS["text"],
             background=COLORS["background"], font=("Segoe UI", 14),
-        ).pack(side="left", padx=12, pady=8)
+        )
+        self.title_label.pack(side="left", padx=12, pady=8)
         self.fullscreen_button = action_button(header, "Fullscreen", self._toggle_fullscreen)
         self.fullscreen_button.pack(side="right", padx=12, pady=8)
         self.content = tk.Frame(self, background=COLORS["background"])

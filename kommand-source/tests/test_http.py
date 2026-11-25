@@ -16,6 +16,7 @@ from kommand_source.transport.http import (  # noqa: E402
     CentralConnectionError,
     UploadError,
     check_central_connection,
+    _error_explanation,
 )
 from kommand_source.capture.mss_provider import MssCaptureProvider  # noqa: E402
 from kommand_source.config import ChannelConfig, SourceConfig  # noqa: E402
@@ -23,6 +24,15 @@ from kommand_common.bandwidth import RollingBandwidth  # noqa: E402
 
 
 class CentralConnectionTests(unittest.TestCase):
+    def test_connection_error_shows_underlying_explanation(self) -> None:
+        from urllib3.exceptions import MaxRetryError, NewConnectionError
+
+        underlying = ConnectionRefusedError(10061, "The target machine actively refused the connection")
+        connection = NewConnectionError(None, "Failed to establish a new connection")
+        connection.__cause__ = underlying
+        error = requests.ConnectionError(MaxRetryError(None, "/long/upload/path", connection))
+        self.assertEqual(_error_explanation(error), underlying.strerror)
+
     @patch("kommand_source.transport.http.requests.get")
     def test_checks_health_endpoint(self, get) -> None:
         response = Mock()

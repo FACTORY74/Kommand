@@ -5,6 +5,8 @@ import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [
     str(ROOT / "kommand-source" / "src"),
@@ -17,6 +19,76 @@ from kommand_source.ui.app import SourceApp  # noqa: E402
 
 
 class SourceUiTests(unittest.TestCase):
+    def test_startup_selects_first_displayed_channel_from_loaded_config(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            first = ChannelConfig(
+                name="alpha", format="video", video_fps=24, quality=73,
+                interval_ms=1500, full_frame_interval_seconds=7, enabled=False,
+            )
+            save_config(path, SourceConfig(channels=[ChannelConfig(name="Zebra"), first]))
+            app = SourceApp(root, load_config(path), path, Mock())
+            self.assertEqual(app.tree.selection(), ("alpha",))
+            self.assertEqual(app.tree.focus(), "alpha")
+            self.assertEqual(app.name.get(), first.name)
+            self.assertEqual(app.capture_format.get(), "VIDEO")
+            self.assertEqual(app.capture_target.get(), first.capture_target)
+            self.assertEqual(app.video_fps.get(), str(first.video_fps))
+            self.assertEqual(app.quality.get(), str(first.quality))
+            self.assertEqual(app.interval.get(), str(first.interval_ms))
+            self.assertEqual(app.full_frame_interval.get(), str(first.full_frame_interval_seconds))
+            self.assertFalse(app.enabled.get())
+            self.assertTrue(app.update_button.instate(["disabled"]))
+            app._clear_editor()
+            self.assertEqual(app.tree.selection(), ())
+            self.assertEqual(app.name.get(), "")
+
+    def test_startup_with_no_channels_leaves_editor_ready_for_new_channel(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        app = SourceApp(root, SourceConfig(channels=[]), Path("unused.json"), Mock())
+        self.assertEqual(app.tree.selection(), ())
+        self.assertEqual(app.name.get(), "")
+        self.assertTrue(app.update_button.instate(["disabled"]))
+
+    def test_channel_preview_loads_latest_frame_and_error_shows_x(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        with tempfile.TemporaryDirectory() as directory:
+            debug_directory = Path(directory)
+            Image.new("RGB", (100, 60), "#228844").save(debug_directory / "main.webp", "WEBP")
+            store = Mock(directory=debug_directory)
+            app = SourceApp(
+                root, SourceConfig(channels=[ChannelConfig(name="main")]), Path("unused.json"), store
+            )
+
+            app._refresh_previews()
+            preview = app.tree.item("main", "image")
+            self.assertTrue(preview)
+            self.assertEqual(app.tree.heading("#0", "text"), "Preview")
+            self.assertEqual(int(app.tree.column("#0", "width")), 76)
+            self.assertFalse(bool(app.tree.column("channel", "stretch")))
+            self.assertEqual(app.tree.set("main", "channel"), "main")
+            app._post_status("main", "Error", "capture failed")
+            app._drain_events()
+            broken = app.tree.item("main", "image")
+            self.assertTrue(broken)
+            self.assertNotEqual(preview, broken)
+
     def test_new_and_update_track_actual_editor_changes(self) -> None:
         try:
             root = tk.Tk()
@@ -30,6 +102,7 @@ class SourceUiTests(unittest.TestCase):
         buttons = app.new_button.master.pack_slaves()
         self.assertLess(buttons.index(app.new_button), buttons.index(app.update_button))
         self.assertTrue(app.update_button.instate(["disabled"]))
+        app._clear_editor()
         app.name.set("new")
         self.assertFalse(app.update_button.instate(["disabled"]))
         app._upsert()
@@ -317,6 +390,26 @@ class SourceUiTests(unittest.TestCase):
         app._drain_events()
         self.assertEqual(app.send_bandwidth_value.get(), "1.00 Mbps")
 
+    def test_connection_status_uses_semantic_colours(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        app = SourceApp(root, SourceConfig(), Path("unused.json"), Mock())
+
+        for status, expected_style in (
+            ("Not contactable", "ConnectionBad.Status.TLabel"),
+            ("Contactable", "ConnectionGood.Status.TLabel"),
+            ("Running", "ConnectionGood.Status.TLabel"),
+            ("Checking…", "ConnectionNeutral.Status.TLabel"),
+            ("Unknown", "ConnectionNeutral.Status.TLabel"),
+        ):
+            app._set_connection_status(status)
+            self.assertEqual(app.connection_status.get(), status)
+            self.assertEqual(app.connection_status_label.cget("style"), expected_style)
+
     def test_window_title_poll_updates_channel_without_reconfiguring_capture(self) -> None:
         try:
             root = tk.Tk()
@@ -421,6 +514,8 @@ class SourceUiTests(unittest.TestCase):
                 ChannelConfig(name="video", capture_type="window", capture_target="Browser"),
             ])
             app = SourceApp(root, config, Path(directory) / "config.json", Mock())
+            self.assertEqual(app.tree.selection(), ("video",))
+            self.assertTrue(app.update_button.instate(["disabled"]))
             with patch("kommand_source.ui.app.find_window", return_value=window):
                 with patch("kommand_source.ui.app.get_window_identity", return_value=WindowIdentity(42, 7, 99)):
                     self.assertTrue(app._save())

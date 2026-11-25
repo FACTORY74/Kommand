@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import math
 from pathlib import Path
+import tempfile
 import threading
+import time
 from typing import Any
 
 
@@ -106,8 +109,25 @@ class LayoutStore:
         self._lock = threading.RLock()
         self._root = GridNode(2, 2)
         self._revision = 0
+        self.window_name = "Kommand Central Display"
         if path and path.exists():
             self._root = self._load(path)
+            name = json.loads(path.read_text(encoding="utf-8")).get("window_name")
+            if isinstance(name, str) and name.strip():
+                self.window_name = name.strip()
+
+    def set_window_name(self, name: str) -> None:
+        name = name.strip() or "Kommand Central Display"
+        with self._lock:
+            if name == self.window_name:
+                return
+            previous = self.window_name
+            self.window_name = name
+            try:
+                self._save()
+            except OSError:
+                self.window_name = previous
+                raise
 
     @property
     def revision(self) -> int:
@@ -248,9 +268,32 @@ class LayoutStore:
         if not self.path:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(json.dumps(self._root.to_dict(), indent=2) + "\n", encoding="utf-8")
-        temporary.replace(self.path)
+        data = self._root.to_dict()
+        data["window_name"] = self.window_name
+        stream = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=self.path.parent,
+            prefix=f".{self.path.name}.", suffix=".tmp", delete=False,
+        )
+        temporary = Path(stream.name)
+        try:
+            with stream:
+                stream.write(json.dumps(data, indent=2) + "\n")
+            for attempt in range(6):
+                try:
+                    temporary.replace(self.path)
+                    break
+                except PermissionError as exc:
+                    # Windows readers/scanners may briefly deny atomic replacement.
+                    if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                        raise
+                    time.sleep(0.02 * 2 ** attempt)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning(
+                    "Could not remove temporary layout file %s", temporary, exc_info=True,
+                )
 
     @staticmethod
     def _load(path: Path) -> GridNode:

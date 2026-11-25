@@ -105,6 +105,8 @@ Linux supports screen capture; window capture is not yet enabled.
 - Central layout: `kommand-central/layout.json`.
 - Central logs: `kommand-central/logs/central.log`, rotated at 5 MiB with five
   backups.
+- Source error logs: `kommand-source/logs/source.log`, with the same rotation
+  limits.
 
 See the [Source README](./kommand-source/README.md) and
 [Central README](./kommand-central/README.md) for capture, transport, and layout
@@ -123,3 +125,5 @@ Run the test suites from the repository root using the virtual environment:
 
 Source and Central live in their respective directories; `kommand-common`
 contains shared UI components.
+Panel titles and the area outside their borders match the window background;
+panel interiors retain their separate surface color.

@@ -175,6 +175,7 @@ class RunnerTests(unittest.TestCase):
                     runner.capture_once(SourceConfig(), ChannelConfig(name="main"))
         provider.close.assert_called_once()
         client.close.assert_called_once()
+        runner.status_callback.assert_called_with("main", "Upload error", "upload failed")
 
     def test_rapid_edits_start_only_latest_configuration(self) -> None:
         runner = SourceRunner(Mock(), Mock())

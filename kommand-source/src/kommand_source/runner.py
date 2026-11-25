@@ -152,14 +152,27 @@ class SourceRunner:
 
     def capture_once(self, config: SourceConfig, channel: ChannelConfig) -> None:
         """Capture, store, and upload one frame in the calling thread."""
-        provider = MssCaptureProvider()
-        client = CentralClient(config, self.bandwidth)
+        try:
+            provider = MssCaptureProvider()
+            try:
+                client = CentralClient(config, self.bandwidth)
+            except Exception:
+                provider.close()
+                raise
+        except Exception as exc:
+            self.status_callback(channel.name, "Error", str(exc))
+            raise
+        uploading = False
         try:
             frame = provider.capture(channel)
             self.debug_store.write(channel.name, frame)
             self.status_callback(channel.name, "Captured", self._now())
+            uploading = True
             client.upload(channel, frame)
             self.status_callback(channel.name, "Uploaded", self._now())
+        except Exception as exc:
+            self.status_callback(channel.name, "Upload error" if uploading else "Error", str(exc))
+            raise
         finally:
             try:
                 provider.close()
@@ -176,6 +189,7 @@ class SourceRunner:
         try:
             while not stop.is_set():
                 started = time.monotonic()
+                uploading = False
                 try:
                     frame = provider.capture(channel)
                     if stop.is_set():
@@ -186,12 +200,13 @@ class SourceRunner:
                     self.status_callback(channel.name, "Captured", self._now())
                     if stop.is_set():
                         break
+                    uploading = True
                     client.upload(channel, frame)
                     failures = 0
                     self.status_callback(channel.name, "Uploaded", self._now())
                 except Exception as exc:
                     failures += 1
-                    self.status_callback(channel.name, "Error", str(exc))
+                    self.status_callback(channel.name, "Upload error" if uploading else "Error", str(exc))
 
                 if channel.format == "video":
                     capture_period = 1 / channel.video_fps
