@@ -7,6 +7,8 @@ import logging
 import shutil
 import tempfile
 import time
+import threading
+from typing import Callable
 
 from kommand_source.capture import CapturedFrame
 
@@ -58,4 +60,47 @@ class DebugStore:
         for candidate in self.directory.glob(f"{channel_name}.*"):
             if candidate != keep and candidate.is_file():
                 candidate.unlink()
+
+
+class LatestDebugWriter:
+    """Keep at most one pending diagnostic image; never delay video uploads."""
+
+    def __init__(
+        self, store: DebugStore, channel: str, report_error: Callable[[str], None],
+    ) -> None:
+        self._store = store
+        self._channel = channel
+        self._report_error = report_error
+        self._changed = threading.Condition()
+        self._pending: CapturedFrame | None = None
+        self._closing = False
+        self._thread = threading.Thread(target=self._run, name=f"diagnostic-{channel}", daemon=True)
+        self._thread.start()
+
+    def submit(self, frame: CapturedFrame) -> None:
+        with self._changed:
+            if self._closing:
+                raise RuntimeError("Diagnostic writer has stopped.")
+            self._pending = frame
+            self._changed.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._changed:
+                self._changed.wait_for(lambda: self._closing or self._pending is not None)
+                if self._closing:
+                    return
+                frame, self._pending = self._pending, None
+            assert frame is not None
+            try:
+                self._store.write(self._channel, frame)
+            except (OSError, ValueError) as exc:
+                self._report_error(str(exc))
+
+    def close(self) -> None:
+        with self._changed:
+            self._closing = True
+            self._pending = None
+            self._changed.notify()
+        self._thread.join()
 

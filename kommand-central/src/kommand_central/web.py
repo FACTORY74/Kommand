@@ -7,13 +7,15 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
+import json
 from pathlib import Path
 import re
+import time
 from uuid import uuid4
 import warnings
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from PIL import Image, UnidentifiedImageError
 
 from kommand_central.bandwidth import ReceiveBandwidth, _ReceiveBandwidthMiddleware
@@ -21,6 +23,7 @@ from kommand_central.state import ChannelStore
 from kommand_central.layout import LayoutStore
 from kommand_central.video import VideoConflict, VideoDecodeError, VideoStreams
 from kommand_central.windows import DisplayLayouts
+from kommand_central.mpegts import NULL_PACKET, VideoMuxer
 from kommand_common import ASSETS
 
 
@@ -40,6 +43,7 @@ class _VideoPacket:
     height: int
     sequence: int
     revision: int
+    timestamp_us: int = 0
 
 
 @dataclass(eq=False)
@@ -64,6 +68,13 @@ def _h264_keyframe(content: bytes) -> bool:
         match.end() < len(content) and content[match.end()] & 0x1f == 5
         for match in re.finditer(b"\x00\x00(?:\x00)?\x01", content)
     )
+
+
+def _video_integer(metadata: dict[str, object], name: str) -> int:
+    value = metadata.get(name)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise HTTPException(status_code=400, detail=f"Invalid video {name}")
+    return value
 
 
 def _validate_image(
@@ -242,10 +253,14 @@ def create_app(
                 pending = None
                 if packet is None:
                     break
+                if not packet.content:
+                    await websocket.send_json({"type": "heartbeat", "revision": packet.revision})
+                    continue
                 await websocket.send_json({
                     "keyframe": packet.keyframe, "stream": packet.stream,
                     "width": packet.width, "height": packet.height,
                     "sequence": packet.sequence, "revision": packet.revision,
+                    "timestamp_us": packet.timestamp_us,
                 })
                 await websocket.send_bytes(packet.content)
         except WebSocketDisconnect:
@@ -266,6 +281,148 @@ def create_app(
                 await websocket.close()
             except (RuntimeError, WebSocketDisconnect):
                 pass
+
+    @app.get("/api/v1/sources/{source}/channels/{channel}/video.ts")
+    async def native_video(source: str, channel: str) -> StreamingResponse:
+        key = (source, channel)
+
+        async def stream():
+            subscriber = _VideoSubscriber()
+            subscribers.setdefault(key, set()).add(subscriber)
+            keyframe_requests.add(key)
+            muxer: VideoMuxer | None = None
+            stream_id: str | None = None
+            sequence: int | None = None
+            origin_us = time.monotonic_ns() // 1000
+            try:
+                while True:
+                    try:
+                        packet = await asyncio.wait_for(subscriber.queue.get(), timeout=.1 if muxer is not None else 1)
+                    except asyncio.TimeoutError:
+                        yield muxer.keepalive(time.monotonic_ns() // 1000) if muxer is not None else NULL_PACKET * 7
+                        continue
+                    if packet is None:
+                        return
+                    if not packet.content:
+                        yield muxer.keepalive(time.monotonic_ns() // 1000) if muxer is not None else NULL_PACKET * 7
+                        continue
+                    if stream_id != packet.stream or sequence != packet.sequence:
+                        if muxer is not None:
+                            muxer.close()
+                        # Keep the player's clock continuous across Source stream restarts.
+                        muxer = VideoMuxer(packet.content, origin_us)
+                        stream_id = packet.stream
+                    assert muxer is not None
+                    yield (
+                        muxer.mux(packet.content, time.monotonic_ns() // 1000, packet.keyframe)
+                        + muxer.keepalive(time.monotonic_ns() // 1000)
+                    )
+                    sequence = packet.sequence + 1
+            finally:
+                if muxer is not None:
+                    muxer.close()
+                subscribers[key].discard(subscriber)
+                if not subscribers[key]:
+                    del subscribers[key]
+                    keyframe_requests.discard(key)
+
+        return StreamingResponse(
+            stream(), media_type="video/mp2t",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.websocket("/api/v1/sources/{source}/channels/{channel}/video-upload")
+    async def persistent_upload(websocket: WebSocket, source: str, channel: str) -> None:
+        await websocket.accept()
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                text = message.get("text")
+                if text is None:
+                    raise HTTPException(status_code=400, detail="Expected video metadata")
+                bandwidth.record(len(text.encode("utf-8")))
+                metadata = json.loads(text)
+                if not isinstance(metadata, dict):
+                    raise HTTPException(status_code=400, detail="Invalid video metadata")
+                captured_at = metadata.get("captured_at", "")
+                if not isinstance(captured_at, str):
+                    raise HTTPException(status_code=400, detail="Invalid capture timestamp")
+                try:
+                    datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="Invalid capture timestamp") from exc
+                if metadata.get("type") == "heartbeat":
+                    revision = metadata.get("revision")
+                    if (
+                        metadata.get("generation") != generation
+                        or not isinstance(revision, int) or isinstance(revision, bool)
+                    ):
+                        raise HTTPException(status_code=409, detail="Server restarted; send a new keyframe")
+                    try:
+                        video_streams.touch(source, channel, revision)
+                        stored = channel_store.heartbeat(source, channel, revision, captured_at)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    key = (source, channel)
+                    requested = key in keyframe_requests
+                    publish(source, channel, _VideoPacket(b"", False, "", stored.width, stored.height, 0, stored.revision))
+                    await websocket.send_json({
+                        "accepted": True, "revision": stored.revision,
+                        "generation": generation, "request_keyframe": requested,
+                    })
+                    continue
+                if metadata.get("type") != "frame" or metadata.get("protocol") != "1":
+                    raise HTTPException(status_code=400, detail="Unsupported video protocol")
+                width, height, sequence = (_video_integer(metadata, name) for name in ("width", "height", "sequence"))
+                stream_id = metadata.get("stream")
+                timestamp = _video_integer(metadata, "timestamp_us")
+                if (
+                    width <= 0 or height <= 0 or sequence < 0 or timestamp < 0 or timestamp > 2 ** 63 - 1
+                    or not isinstance(stream_id, str) or not re.fullmatch(r"[0-9a-f]{32}", stream_id)
+                ):
+                    raise HTTPException(status_code=400, detail="Invalid video metadata")
+                if (
+                    width > MAX_FRAME_WIDTH or height > MAX_FRAME_HEIGHT
+                    or (width + width % 2) * (height + height % 2) > MAX_FRAME_PIXELS
+                ):
+                    raise HTTPException(status_code=413, detail="Video dimensions exceed limits")
+                if sequence != 0 and metadata.get("generation") != generation:
+                    raise HTTPException(status_code=409, detail="Server restarted; send a new keyframe")
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                content = message.get("bytes")
+                if content is None:
+                    raise HTTPException(status_code=400, detail="Expected an H.264 packet")
+                bandwidth.record(len(content))
+                if not content or len(content) > MAX_FRAME_BYTES:
+                    raise HTTPException(status_code=413, detail="Video packet is empty or exceeds 25 MiB")
+                try:
+                    stored = await asyncio.to_thread(
+                        video_streams.receive, source, channel, stream_id, sequence,
+                        width, height, content, captured_at,
+                    )
+                except (VideoConflict, VideoDecodeError) as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                keyframe = _h264_keyframe(content)
+                publish(source, channel, _VideoPacket(
+                    content, keyframe, stream_id, width, height, sequence, stored.revision, timestamp,
+                ))
+                key = (source, channel)
+                requested = key in keyframe_requests and not keyframe
+                keyframe_requests.discard(key)
+                await websocket.send_json({
+                    "accepted": True, "revision": stored.revision,
+                    "generation": generation, "request_keyframe": requested,
+                })
+        except WebSocketDisconnect:
+            pass
+        except (HTTPException, ValueError) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            await websocket.send_json({"accepted": False, "detail": detail})
+            await websocket.close(code=1008)
 
     @app.get("/api/v1/sources/{source}/channels/{channel}/frame")
     def latest_frame(source: str, channel: str) -> Response:
@@ -387,7 +544,7 @@ def create_app(
             raise HTTPException(status_code=413, detail="Video frame exceeds 25 MiB")
         video_streams.expire()
         try:
-            stored = video_streams.receive(
+            stored = await asyncio.to_thread(video_streams.receive,
                 source, channel, stream_id, sequence, width, height, content, captured_at
             )
         except VideoConflict as exc:
@@ -395,7 +552,7 @@ def create_app(
         except VideoDecodeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         keyframe = _h264_keyframe(content)
-        publish(source, channel, _VideoPacket(content, keyframe, stream_id, width, height, sequence, stored.revision))
+        publish(source, channel, _VideoPacket(content, keyframe, stream_id, width, height, sequence, stored.revision, time.monotonic_ns() // 1000))
         request_keyframe = (source, channel) in keyframe_requests and not keyframe
         keyframe_requests.discard((source, channel))
         return {

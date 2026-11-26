@@ -57,6 +57,13 @@ class VideoStreams:
                 if stream.last_seen <= cutoff:
                     del self._streams[key]
 
+    def touch(self, source: str, channel: str, revision: int) -> None:
+        with self._lock:
+            stream = self._streams.get((source, channel))
+            if stream is None or stream.revision != revision:
+                raise VideoConflict("Video stream expired; send a new keyframe.")
+            stream.last_seen = self._clock()
+
     def receive(
         self, source: str, channel: str, stream_id: str, sequence: int,
         width: int, height: int, content: bytes, captured_at: str,
@@ -85,10 +92,10 @@ class VideoStreams:
                 frame = frames[0]
                 if (frame.width, frame.height) != (width + width % 2, height + height % 2):
                     raise VideoDecodeError("Video dimensions do not match the declared size.")
-                image = frame.to_image().crop((0, 0, width, height))
                 stored = self._store.update_if_revision(
                     source, channel, None, "image/webp", width, height, captured_at,
-                    image, previous.revision if sequence != 0 and previous is not None else None,
+                    None, previous.revision if sequence != 0 and previous is not None else None,
+                    decoded=frame,
                 )
             except (FFmpegError, VideoDecodeError, ValueError) as exc:
                 if sequence != 0:

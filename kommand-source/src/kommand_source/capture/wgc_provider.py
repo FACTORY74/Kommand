@@ -30,7 +30,7 @@ def _bounds(window: WindowInfo) -> tuple[int, int, int, int]:
 class WindowsCaptureSession:
     """Keep one native capture alive while a channel is running."""
 
-    def __init__(self, identity: WindowIdentity) -> None:
+    def __init__(self, identity: WindowIdentity, fps: int = 15) -> None:
         try:
             from windows_capture import Frame, InternalCaptureControl, WindowsCapture
         except ImportError as exc:
@@ -43,6 +43,10 @@ class WindowsCaptureSession:
         self._window_size = (window.width, window.height)
         self._changed = threading.Condition()
         self._latest: NDArray[np.uint8] | None = None
+        self._generation = 0
+        self._image_generation = -1
+        self._image: Image.Image | None = None
+        self._next_copy = float("-inf")
         self._error: Exception | None = None
         self._closing = False
         self._capture = WindowsCapture(
@@ -52,6 +56,9 @@ class WindowsCaptureSession:
         )
         started = False
         try:
+            now = time.monotonic()
+            if now < self._next_copy:
+                return
             @self._capture.event
             def on_frame_arrived(frame: Frame, control: InternalCaptureControl) -> None:
                 try:
@@ -59,6 +66,9 @@ class WindowsCaptureSession:
                     pixels = frame.frame_buffer.copy()
                     with self._changed:
                         self._latest = pixels
+                        deadline = self._next_copy + 1 / fps
+                        self._next_copy = deadline if deadline > now else now + 1 / fps
+                        self._generation += 1
                         self._changed.notify_all()
                 except Exception as exc:
                     with self._changed:
@@ -94,6 +104,7 @@ class WindowsCaptureSession:
                     raise WindowsGraphicsCaptureError("Window capture has stopped.")
                 latest = self._latest
                 if latest is not None:
+                    generation = self._generation
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -103,11 +114,13 @@ class WindowsCaptureSession:
                 self._changed.wait(remaining)
 
         pixels = latest
-        image = Image.fromarray(pixels[:, :, [2, 1, 0]].copy(), mode="RGB")
-        if image.getbbox() is None:
-            raise WindowsGraphicsCaptureError(
-                f"Windows returned an empty frame for '{window.title}'. The application may block capture."
+        if generation != self._image_generation:
+            self._image = Image.frombuffer(
+                "RGB", (pixels.shape[1], pixels.shape[0]), pixels, "raw", "BGRX", 0, 1,
             )
+            self._image_generation = generation
+        assert self._image is not None
+        image = self._image
         current = resolve_window(self.identity)
         if _bounds(current) != _bounds(window):
             raise WindowsGraphicsCaptureError("Window changed during capture; retrying.")

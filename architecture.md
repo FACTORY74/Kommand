@@ -1,5 +1,19 @@
 # Kommand Architecture
 
+## Current video pipeline
+
+Channels now deliver H.264 exclusively. Source uses a persistent WebSocket per
+channel, sends idle heartbeats instead of redundant video, and saves diagnostic
+snapshots on a separate bounded worker. Existing image/patch configurations
+migrate without changing channel identities.
+
+Central validates encoded packets and retains decoded native frames; Pillow
+snapshots are lazy. Desktop output retains Tk controls and embeds libVLC players
+fed timestamped MPEG-TS remuxed from the original H.264 packets. Browser output
+uses WebCodecs. Neither full-rate video output path uses Tk PhotoImage rendering.
+Window/screen capture is still required on Source; direct originating media
+streams are not implemented. The sections below include historical proposals.
+
 ## 1. Purpose
 
 Kommand is a control-room display system. Lightweight agents capture screenshots from participating Windows and Linux machines and publish them as named channels to a central server. The central server maintains the available channels and presents them in configurable layouts through a local, full-screen-capable Tkinter display.

@@ -1,6 +1,6 @@
 # Kommand
 
-Kommand brings screenshots from multiple machines together in a local
+Kommand brings live video from multiple machines together in a local
 control-room display. **Kommand Source** captures named screen or window
 channels and sends them to **Kommand Central**, where you arrange them into a
 resizable, fullscreen-capable grid.
@@ -11,11 +11,10 @@ resizable, fullscreen-capable grid.
 
 ## What it does
 
-- Capture multiple channels on independent schedules, with editable quality and
-  full-frame intervals.
+- Capture multiple channels with independent frame rates, quality and keyframe intervals.
 - Capture screens on Windows and Linux, and visible application windows on
   Windows, including windows obscured by other applications.
-- Choose full WebP frames, WebP change patches, or H.264 video per channel.
+- Deliver every channel as H.264 over a persistent connection, with lightweight idle heartbeats.
 - Arrange channels in nested grids and edit layouts while sources are running.
 - Display the layout locally on Central, with fullscreen controls and a receive
   bandwidth indicator.
@@ -50,7 +49,11 @@ the dependencies. Run it on the Central machine and on each Source machine.
 ```
 
 Select **Start server**, then **Open display**. Central listens on port `8000`
-by default. The display is a local Tkinter window; use **Fullscreen** or F11 to
+by default. The display retains Tkinter controls but embeds native VLC video
+surfaces rather than drawing video frames as Tk images. Windows setup installs
+a checksum-verified portable VLC runtime inside `.venv`; no system VLC installation
+is required. Hardware decoding is requested, with VLC's software decoding available
+on unsupported hardware. Use **Fullscreen** or F11 to
 toggle fullscreen and Escape to leave it.
 
 [![Kommand Central server and layout controls](./_progress/2026-11-25%20-%20Central.png)](./_progress/2026-11-25%20-%20Central.png)
@@ -66,8 +69,9 @@ Set the Central URL to `http://127.0.0.1:8000` on the same machine, or
 Select **New**, name the channel, choose a screen or window, select **Update**, then
 **Save config** and **Start capture**. For screen targets, `0` is the combined
 desktop; `1`, `2`, and so on select individual monitors.
-The default format is **WEBP + PATCH**. Choose **WEBP** for full frames or
-**VIDEO** for H.264, with a separate target frame rate (15 fps by default).
+All channels use **H.264**, with a target frame rate of 15 fps by default.
+Existing WebP and patch configurations migrate automatically on load; Save/Start
+persists the migration without changing channel names or window matching.
 Video carries images only, not audio. Update Source and Central together.
 
 [![Kommand Source connection and channel controls](./_progress/2026-11-25%20-%20Source.png)](./_progress/2026-11-25%20-%20Source.png)
@@ -95,7 +99,8 @@ python kommand-central/run.py
 python kommand-source/run.py
 ```
 
-Linux supports screen capture; window capture is not yet enabled.
+Linux supports screen capture; window capture is not yet enabled. Install VLC
+through your distribution's package manager for the embedded desktop display.
 
 ## Configuration and logs
 

@@ -242,7 +242,7 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(window._slots[1].channel, "source/main")
         self.assertEqual(window._slots[1].name.cget("text"), "Panel 2 / source/main")
 
-    def test_video_channels_use_the_faster_display_refresh(self) -> None:
+    def test_native_video_controls_do_not_require_frame_rate_tk_refresh(self) -> None:
         try:
             root = tk.Tk()
         except tk.TclError as exc:
@@ -252,7 +252,7 @@ class DisplayTests(unittest.TestCase):
         store = ChannelStore()
         layouts = LayoutStore()
         layouts.assign((0,), "source/main")
-        window = DisplayWindow(root, store, layouts)
+        window = DisplayWindow(root, store, layouts, stream_url="http://127.0.0.1:8000")
         self.addCleanup(window.destroy)
         root.update()
         with patch.object(window, "after", wraps=window.after) as after:
@@ -263,8 +263,16 @@ class DisplayTests(unittest.TestCase):
                 "source", "main", None, "image/webp", 16, 16,
                 "2026-01-01T00:00:00Z", image, None,
             )
-            window._refresh()
-            self.assertEqual(after.call_args.args[0], 16)
+            with patch("kommand_central.display.NativeVideoEngine"), patch(
+                "kommand_central.display.NativeVideoPanel",
+            ) as panel_type:
+                panel = panel_type.return_value
+                panel.surface = tk.Frame(window._slots[0].label)
+                panel.update.return_value = None
+                window._refresh()
+                panel.update.assert_called_once()
+                self.assertIsNone(window._slots[0].photo)
+                self.assertEqual(after.call_args.args[0], 100)
 
     def test_panel_labels_cover_waiting_nested_and_resized_layouts(self) -> None:
         try:

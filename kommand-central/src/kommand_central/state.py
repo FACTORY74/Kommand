@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from io import BytesIO
 import threading
 
 from PIL import Image
+from av import VideoFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,7 +16,7 @@ class ChannelFrame:
     source: str
     channel: str
     _content: bytes | None
-    image: Image.Image
+    _image: Image.Image | None
     media_type: str
     width: int
     height: int
@@ -23,14 +24,33 @@ class ChannelFrame:
     received_at: str
     revision: int
     streaming: bool = False
+    _decoded: VideoFrame | None = field(default=None, repr=False, compare=False)
+    _image_lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    @property
+    def image(self) -> Image.Image:
+        with self._image_lock:
+            if self._image is None:
+                if self._decoded is None:
+                    raise RuntimeError("Channel has no decoded image.")
+                image = self._decoded.to_image()
+                if image.size != (self.width, self.height):
+                    image = image.crop((0, 0, self.width, self.height))
+                object.__setattr__(self, "_image", image)
+            assert self._image is not None
+            return self._image
 
     @property
     def content(self) -> bytes:
         if self._content is not None:
             return self._content
-        encoded = BytesIO()
-        self.image.save(encoded, format="WEBP", lossless=True)
-        return encoded.getvalue()
+        with self._image_lock:
+            if self._content is None:
+                encoded = BytesIO()
+                self.image.save(encoded, format="WEBP", lossless=True)
+                object.__setattr__(self, "_content", encoded.getvalue())
+            assert self._content is not None
+            return self._content
 
 
 class ChannelStore:
@@ -53,15 +73,19 @@ class ChannelStore:
         width: int,
         height: int,
         captured_at: str,
-        image: Image.Image,
+        image: Image.Image | None,
+        decoded: VideoFrame | None = None,
     ) -> ChannelFrame:
+        if image is None and decoded is None:
+            raise ValueError("A channel update must contain a decoded frame.")
         with self._lock:
             self._revision += 1
             frame = ChannelFrame(
                 source=source,
                 channel=channel,
                 _content=content,
-                image=image,
+                _image=image,
+                _decoded=decoded,
                 media_type=media_type,
                 width=width,
                 height=height,
@@ -104,8 +128,9 @@ class ChannelStore:
         width: int,
         height: int,
         captured_at: str,
-        image: Image.Image,
+        image: Image.Image | None,
         expected_revision: int | None,
+        decoded: VideoFrame | None = None,
     ) -> ChannelFrame:
         with self._lock:
             current = self._frames.get((source, channel))
@@ -114,7 +139,7 @@ class ChannelStore:
             ):
                 raise ValueError("Frame revision mismatch; send a full frame")
             frame = replace(
-                self.update(source, channel, content, media_type, width, height, captured_at, image),
+                self.update(source, channel, content, media_type, width, height, captured_at, image, decoded),
                 streaming=True,
             )
             self._frames[(source, channel)] = frame

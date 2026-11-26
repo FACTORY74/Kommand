@@ -5,6 +5,7 @@ from pathlib import Path
 import tkinter as tk
 
 from kommand_central.ui import CentralApp
+from kommand_central.native_video import prepare_native_video
 
 
 def configure_logging(log_path: Path | None = None) -> None:
@@ -40,6 +41,7 @@ def configure_logging(log_path: Path | None = None) -> None:
 
 def main() -> None:
     configure_logging()
+    prepare_native_video()
     root = tk.Tk()
     CentralApp(root)
     root.mainloop()

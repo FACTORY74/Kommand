@@ -67,15 +67,16 @@ class ConfigTests(unittest.TestCase):
             config = load_config(path)
         self.assertEqual(config.channels, [ChannelConfig(name="main")])
 
-    def test_legacy_formats_migrate_to_webp_and_default_full_interval(self) -> None:
+    def test_legacy_formats_migrate_to_h264_and_preserve_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(
-                '{"channels":[{"name":"main","image_format":"JPEG"}]}',
+                '{"channels":[{"name":"main","image_format":"JPEG","format":"webp_patch","quality":91,"video_fps":24}]}',
                 encoding="utf-8",
             )
             config = load_config(path)
         self.assertEqual(config.channels[0].full_frame_interval_seconds, 60)
+        self.assertEqual((config.channels[0].name, config.channels[0].format, config.channels[0].quality, config.channels[0].video_fps), ("main", "video", 91, 24))
 
     def test_full_frame_interval_is_validated_and_persisted(self) -> None:
         with self.assertRaisesRegex(ValueError, "Full frame interval"):
@@ -93,7 +94,7 @@ class ConfigTests(unittest.TestCase):
                 expected = SourceConfig(channels=[ChannelConfig(name="main", format=value, video_fps=24)])
                 save_config(path, expected)
                 self.assertEqual(load_config(path), expected)
-        with self.assertRaisesRegex(ValueError, "Format"):
+        with self.assertRaisesRegex(ValueError, "H.264"):
             ChannelConfig(name="main", format="invalid").validate()
         for fps in (0, 61, True):
             with self.assertRaisesRegex(ValueError, "Video FPS"):

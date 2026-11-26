@@ -47,10 +47,14 @@ class ChannelConfig:
     window_handle: int | None = None
     window_process_id: int | None = None
     window_process_start: int | None = None
-    format: str = "webp_patch"
+    format: str = "video"
     video_fps: int = 15
     window_executable: str | None = None
     window_title_match: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.format in {"webp", "webp_patch"}:
+            self.format = "video"
 
     def validate(self) -> None:
         if not CHANNEL_NAME_PATTERN.fullmatch(self.name):
@@ -65,8 +69,8 @@ class ChannelConfig:
             raise ValueError("Full frame interval must be between 1 second and 24 hours.")
         if not 1 <= self.quality <= 100:
             raise ValueError("Image quality must be between 1 and 100.")
-        if self.format not in {"webp", "webp_patch", "video"}:
-            raise ValueError("Format must be WEBP, WEBP + PATCH, or VIDEO.")
+        if self.format != "video":
+            raise ValueError("Channel delivery must be H.264 video.")
         if not isinstance(self.video_fps, int) or isinstance(self.video_fps, bool) or not 1 <= self.video_fps <= 60:
             raise ValueError("Video FPS must be between 1 and 60.")
         identity = (self.window_handle, self.window_process_id, self.window_process_start)

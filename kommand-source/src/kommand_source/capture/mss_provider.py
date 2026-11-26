@@ -88,13 +88,13 @@ class MssCaptureProvider:
             if self._window_session is not None and self._window_session.identity != identity:
                 self.close()
             if self._window_session is None:
-                self._window_session = WindowsCaptureSession(identity)
+                self._window_session = WindowsCaptureSession(identity, fps=channel.video_fps)
             try:
                 try:
                     image, window = self._window_session.capture()
                 except WindowCaptureResized:
                     self.close()
-                    self._window_session = WindowsCaptureSession(identity)
+                    self._window_session = WindowsCaptureSession(identity, fps=channel.video_fps)
                     image, window = self._window_session.capture()
             except Exception:
                 self.close()
@@ -103,7 +103,7 @@ class MssCaptureProvider:
                 image = image.convert("RGB")
             return self._prepare(
                 image, channel,
-                ("window", identity.handle, identity.process_id, identity.process_start, window.left, window.top,
+                ("window", identity.handle, identity.process_id, identity.process_start,
                  window.width, window.height),
             )
         except WindowsGraphicsCaptureError as exc:
@@ -144,12 +144,10 @@ class MssCaptureProvider:
     def _prepare(
         image: Image.Image, channel: ChannelConfig, alignment: tuple[object, ...]
     ) -> CapturedFrame:
-        if channel.format == "video":
-            return CapturedFrame(
-                content=b"", width=image.width, height=image.height,
-                media_type="image/webp", extension="webp", alignment=alignment, image=image,
-            )
-        return MssCaptureProvider._encode(image, channel.quality, alignment)
+        return CapturedFrame(
+            content=b"", width=image.width, height=image.height,
+            media_type="image/webp", extension="webp", alignment=alignment, image=image,
+        )
 
     @staticmethod
     def _encode(

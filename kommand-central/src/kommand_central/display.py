@@ -5,8 +5,10 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import sys
 import tkinter as tk
+from urllib.parse import quote
 from tkinter import messagebox
 from typing import Any
 
@@ -16,6 +18,7 @@ from kommand_central.layout import (
     MAX_PAN, MAX_ZOOM, MIN_ZOOM, LayoutStore, Viewport, format_panel_label,
 )
 from kommand_central.state import ChannelStore
+from kommand_central.native_video import NativeVideoEngine, NativeVideoPanel
 from kommand_common.ui import COLORS, action_button
 
 
@@ -103,13 +106,20 @@ class _Slot:
     revision: int | None = None
     size: tuple[int, int] | None = None
     photo: ImageTk.PhotoImage | None = None
+    video: NativeVideoPanel | None = None
 
 
 class DisplayWindow(tk.Toplevel):
-    def __init__(self, master: tk.Misc, store: ChannelStore, layouts: LayoutStore) -> None:
+    def __init__(
+        self, master: tk.Misc, store: ChannelStore, layouts: LayoutStore,
+        stream_url: str | None = None,
+    ) -> None:
         super().__init__(master)
         self.store = store
         self.layouts = layouts
+        self.stream_url = stream_url
+        self._video_engine: NativeVideoEngine | None = None
+        self._video_error: str | None = None
         self._layout_revision = -1
         self._slots: list[_Slot] = []
         self._slot_by_widget: dict[tk.Misc, _Slot] = {}
@@ -370,6 +380,7 @@ class DisplayWindow(tk.Toplevel):
             self._drag_initial_view = None
             self._drag_moving = False
             self._set_drag_target(None)
+            self._close_videos()
             for child in self.content.winfo_children():
                 child.destroy()
             self._slots.clear()
@@ -382,6 +393,7 @@ class DisplayWindow(tk.Toplevel):
             frame = frames.get(channel) if channel is not None else None
             label = slot.label
             if frame is None:
+                self._close_video(slot)
                 label.configure(text=f"Waiting for {channel}" if channel else "Unassigned panel", image="")
                 slot.revision = None
                 slot.photo = None
@@ -389,6 +401,36 @@ class DisplayWindow(tk.Toplevel):
             size = (label.winfo_width(), label.winfo_height())
             if size[0] <= 1 or size[1] <= 1:
                 continue
+            if frame.streaming:
+                try:
+                    if self._video_error is not None:
+                        label.configure(text=self._video_error)
+                        continue
+                    if self.stream_url is None:
+                        raise RuntimeError("Start Central's server before opening a native video display.")
+                    if self._video_engine is None:
+                        self._video_engine = NativeVideoEngine()
+                    if slot.video is None:
+                        url = (
+                            f"{self.stream_url}/api/v1/sources/{quote(frame.source, safe='')}"
+                            f"/channels/{quote(frame.channel, safe='')}/video.ts"
+                        )
+                        slot.video = NativeVideoPanel(label, self._video_engine, url)
+                        widget = slot.video.surface
+                        self._slot_by_widget[widget] = slot
+                        widget.bind("<ButtonPress-1>", self._drag_start)
+                        widget.bind("<B1-Motion>", self._drag_motion)
+                        widget.bind("<ButtonRelease-1>", self._drag_release)
+                    status = slot.video.update(size, (frame.width, frame.height), slot.view)
+                    if (datetime.now(timezone.utc) - datetime.fromisoformat(frame.received_at)).total_seconds() > 3:
+                        status = "Source stopped updating"
+                    slot.name.configure(text=f"{format_panel_label(slot.path)} / {channel}" + (f" - {status}" if status else ""))
+                except (OSError, RuntimeError) as exc:
+                    self._video_error = str(exc)
+                    label.configure(text=self._video_error)
+                    messagebox.showerror("Native video playback", self._video_error, parent=self)
+                continue
+            self._close_video(slot)
             if frame.revision == slot.revision and size == slot.size:
                 continue
             scaled = _render_view(frame.image, size, slot.view)
@@ -403,10 +445,24 @@ class DisplayWindow(tk.Toplevel):
             and frame.streaming
             for slot in self._slots
         )
-        self._refresh_job = self.after(16 if streaming else 50, self._refresh)
+        self._refresh_job = self.after(100 if streaming else 50, self._refresh)
+
+    def _close_videos(self) -> None:
+        for slot in self._slots:
+            self._close_video(slot)
+
+    def _close_video(self, slot: _Slot) -> None:
+        if slot.video is not None:
+            self._slot_by_widget.pop(slot.video.surface, None)
+            slot.video.close()
+            slot.video = None
 
     def destroy(self) -> None:
         if self._refresh_job is not None:
             self.after_cancel(self._refresh_job)
             self._refresh_job = None
+        self._close_videos()
+        if self._video_engine is not None:
+            self._video_engine.close()
+            self._video_engine = None
         super().destroy()

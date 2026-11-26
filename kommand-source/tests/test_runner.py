@@ -32,7 +32,7 @@ class RunnerTests(unittest.TestCase):
     @patch("kommand_source.runner.time.monotonic", return_value=100.0)
     @patch("kommand_source.runner.CentralClient")
     @patch("kommand_source.runner.MssCaptureProvider")
-    def test_full_frame_interval_limits_time_between_captures(
+    def test_old_image_interval_does_not_limit_video_capture(
         self, provider, client, monotonic
     ) -> None:
         runner = SourceRunner(Mock(), Mock())
@@ -46,13 +46,13 @@ class RunnerTests(unittest.TestCase):
         channel = ChannelConfig(name="main", interval_ms=120_000, full_frame_interval_seconds=60)
         with patch.object(stop, "wait", side_effect=finish_after_wait):
             runner._run_channel(SourceConfig(), channel, stop)
-        self.assertEqual(delays, [60])
+        self.assertEqual(delays, [1 / 15])
 
     @patch("kommand_source.runner.time.monotonic", return_value=100.0)
     @patch("kommand_source.runner.CentralClient")
     @patch("kommand_source.runner.MssCaptureProvider")
     def test_format_selects_the_capture_period(self, provider, client, monotonic) -> None:
-        for format_name, expected_delay in (("webp", 120), ("video", 1 / 20)):
+        for format_name, expected_delay in (("webp", 1 / 20), ("video", 1 / 20)):
             with self.subTest(format=format_name):
                 stop = threading.Event()
                 delays = []

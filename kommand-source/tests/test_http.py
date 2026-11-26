@@ -1,5 +1,5 @@
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import sys
 import threading
 import unittest
@@ -57,49 +57,27 @@ class CentralConnectionTests(unittest.TestCase):
         with self.assertRaisesRegex(CentralConnectionError, "connection refused"):
             check_central_connection("http://central.example")
 
-    def test_sent_bandwidth_counts_actual_multipart_bodies_across_clients(self) -> None:
-        received: list[int] = []
-        reject = [False]
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self) -> None:
-                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                received.append(len(body))
-                content = b'{"revision":1,"generation":"test"}'
-                self.send_response(503 if reject[0] else 202)
-                self.send_header("Content-Length", str(len(content)))
-                self.end_headers()
-                self.wfile.write(content)
-
-            def log_message(self, format: str, *args: object) -> None:
-                pass
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(thread.join)
-        self.addCleanup(server.shutdown)
+    @patch("kommand_source.transport.http.connect")
+    def test_sent_bandwidth_counts_video_payload_and_heartbeats(self, connect) -> None:
+        socket = connect.return_value
+        socket.recv.return_value = json.dumps({"accepted": True, "revision": 1, "generation": "test"})
         now = [0.0]
         bandwidth = RollingBandwidth(clock=lambda: now[0])
-        config = SourceConfig(central_url=f"http://127.0.0.1:{server.server_port}")
+        config = SourceConfig(central_url="http://central.example")
         first = CentralClient(config, bandwidth)
-        second = CentralClient(config, bandwidth)
         self.addCleanup(first.close)
-        self.addCleanup(second.close)
         channel = ChannelConfig(name="main")
         frame = MssCaptureProvider._encode(Image.new("RGB", (16, 16), "red"), 80, ("screen", 1))
 
         first.upload(channel, frame)
         first.upload(channel, frame)
-        reject[0] = True
-        with self.assertRaises(UploadError):
-            second.upload(channel, frame)
-        self.assertEqual(len(received), 3)
-        self.assertEqual(received[1], 0)
-        self.assertGreater(received[0], len(frame.content))
-        self.assertEqual(bandwidth.bytes_in_window, sum(received))
-        self.assertEqual(bandwidth.bytes_per_second, sum(received) / 5)
+        transmitted = [call.args[0] for call in socket.send.call_args_list]
+        total = sum(len(value) if isinstance(value, bytes) else len(value.encode("utf-8")) for value in transmitted)
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(len([value for value in transmitted if isinstance(value, bytes)]), 1)
+        self.assertEqual(json.loads(transmitted[-1])["type"], "heartbeat")
+        self.assertEqual(bandwidth.bytes_in_window, total)
+        self.assertEqual(bandwidth.bytes_per_second, total / 5)
         now[0] = 5.0
         self.assertEqual(bandwidth.bytes_per_second, 0)
 

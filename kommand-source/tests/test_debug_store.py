@@ -1,15 +1,16 @@
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from kommand_source.capture import CapturedFrame  # noqa: E402
-from kommand_source.debug_store import DebugStore  # noqa: E402
+from kommand_source.debug_store import DebugStore, LatestDebugWriter  # noqa: E402
 
 
 def frame(content: bytes, extension: str = "jpg") -> CapturedFrame:
@@ -23,6 +24,35 @@ def frame(content: bytes, extension: str = "jpg") -> CapturedFrame:
 
 
 class DebugStoreTests(unittest.TestCase):
+    def test_background_writer_replaces_pending_frames_and_reports_failures(self) -> None:
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        stored = []
+        errors = []
+        def write(channel, captured):
+            stored.append(captured.content)
+            if len(stored) == 1:
+                entered.set()
+                if not release.wait(3):
+                    raise TimeoutError("test writer was not released")
+            else:
+                finished.set()
+                raise PermissionError("diagnostic locked")
+        store = Mock()
+        store.write.side_effect = write
+        writer = LatestDebugWriter(store, "main", errors.append)
+        try:
+            writer.submit(frame(b"first"))
+            self.assertTrue(entered.wait(2))
+            writer.submit(frame(b"replaced"))
+            writer.submit(frame(b"latest"))
+            release.set()
+            self.assertTrue(finished.wait(2))
+        finally:
+            release.set()
+            writer.close()
+        self.assertEqual(stored, [b"first", b"latest"])
+        self.assertEqual(errors, ["diagnostic locked"])
+
     def test_write_retries_windows_reader_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DebugStore(Path(directory))

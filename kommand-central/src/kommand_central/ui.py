@@ -17,7 +17,7 @@ from kommand_central.bandwidth import ReceiveBandwidth
 from kommand_central.display import DisplayWindow, _render_view
 from kommand_central.state import ChannelStore
 from kommand_central.layout import LayoutStore, Viewport, format_panel_label
-from kommand_central.web import create_app
+from kommand_central.web import MAX_FRAME_BYTES, create_app
 from kommand_central.windows import DisplayLayouts
 from kommand_common.ui import NumberStepper, action_button, app_header, apply_theme, card
 
@@ -244,6 +244,8 @@ class CentralApp(ttk.Frame):
             port=port,
             log_level="info",
             log_config=None,
+            ws_max_size=MAX_FRAME_BYTES + 4096,
+            timeout_graceful_shutdown=2,
         )
         self.server = uvicorn.Server(config)
         self.server_thread = threading.Thread(target=self._run_server, name="central-server", daemon=True)
@@ -278,7 +280,17 @@ class CentralApp(ttk.Frame):
         if not self._save_window_name():
             return
         if self.display_window is None or not self.display_window.winfo_exists():
-            self.display_window = DisplayWindow(self.master, self.store, self.layouts)
+            host = self.server.config.host if self.server else self.host.get().strip()
+            if host in ("0.0.0.0", ""):
+                host = "127.0.0.1"
+            elif host == "::":
+                host = "[::1]"
+            elif ":" in host:
+                host = f"[{host}]"
+            self.display_window = DisplayWindow(
+                self.master, self.store, self.layouts,
+                stream_url=f"http://{host}:{self.server.config.port if self.server else self.port.get()}",
+            )
             self._display_windows[self._active_window] = self.display_window
         else:
             self.display_window.lift()

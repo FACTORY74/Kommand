@@ -65,6 +65,27 @@ if ($LASTEXITCODE -ne 0) {
     throw "Dependency installation failed."
 }
 
+if ($env:OS -eq "Windows_NT") {
+    $vlcVersion = "3.0.24"
+    $vlcPath = Join-Path $venvPath "vlc-$vlcVersion"
+    if (-not (Test-Path -LiteralPath (Join-Path $vlcPath "libvlc.dll"))) {
+        $archive = Join-Path $venvPath "vlc-$vlcVersion-win64.zip"
+        Write-Host "Installing portable VLC $vlcVersion for native video playback..." -ForegroundColor Cyan
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://download.videolan.org/pub/videolan/vlc/$vlcVersion/win64/vlc-$vlcVersion-win64.zip" -OutFile $archive
+            $expected = "fcf30850371ad10c9373cc4f0f4501e7dee49e3e9ae9f20c72fb2661a1ca6323"
+            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+                throw "VLC archive checksum verification failed."
+            }
+            Expand-Archive -LiteralPath $archive -DestinationPath $venvPath -Force
+        } finally {
+            if (Test-Path -LiteralPath $archive) {
+                Remove-Item -LiteralPath $archive -Force
+            }
+        }
+    }
+}
+
 Write-Host "Verifying Kommand Source imports..." -ForegroundColor Cyan
 $sourcePath = Join-Path $projectRoot "kommand-source\src"
 $centralPath = Join-Path $projectRoot "kommand-central\src"

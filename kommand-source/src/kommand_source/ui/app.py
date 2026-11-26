@@ -35,7 +35,7 @@ from kommand_source.transport import CentralConnectionError, check_central_conne
 from kommand_common.bandwidth import RollingBandwidth
 from kommand_common.ui import NumberStepper, action_button, app_header, apply_theme, card
 
-FORMAT_LABELS = {"WEBP": "webp", "WEBP + PATCH": "webp_patch", "VIDEO": "video"}
+FORMAT_LABELS = {"H.264": "video"}
 
 
 class SourceApp(ttk.Frame):
@@ -80,7 +80,7 @@ class SourceApp(ttk.Frame):
         self.central_url = tk.StringVar(value=config.central_url)
         self.name = tk.StringVar()
         self.capture_type = tk.StringVar(value="screen")
-        self.capture_format = tk.StringVar(value="WEBP + PATCH")
+        self.capture_format = tk.StringVar(value="H.264")
         self.capture_target = tk.StringVar(value="1")
         self.window_executable = tk.StringVar()
         self.window_title_match = tk.StringVar()
@@ -138,7 +138,7 @@ class SourceApp(ttk.Frame):
         self.after(0, self._check_window_titles)
 
     def _build(self) -> None:
-        app_header(self, "Kommand-Source: Define screenshots and destination").pack(
+        app_header(self, "Kommand-Source: Define video channels and destination").pack(
             fill="x", pady=(0, 14)
         )
 
@@ -232,12 +232,11 @@ class SourceApp(ttk.Frame):
         self.capture_type_input.grid(row=1, column=1, sticky="ew", padx=(0, 12))
         self.capture_type_input.bind("<<ComboboxSelected>>", self._capture_type_selected)
         ttk.Label(editor, text="Format").grid(row=0, column=2, sticky="w")
-        self.format_input = ttk.Combobox(
-            editor, textvariable=self.capture_format, values=tuple(FORMAT_LABELS),
-            state="readonly", width=14, style="Source.TCombobox",
+        self.format_input = ttk.Entry(
+            editor, textvariable=self.capture_format, state="readonly",
+            width=14, style="Source.TEntry",
         )
         self.format_input.grid(row=1, column=2, sticky="ew", padx=(0, 12))
-        self.format_input.bind("<<ComboboxSelected>>", self._format_changed)
         ttk.Label(editor, text="Target").grid(row=0, column=3, sticky="w")
         self.target_input = ttk.Combobox(
             editor, textvariable=self.capture_target, width=24,
@@ -576,7 +575,7 @@ class SourceApp(ttk.Frame):
         self._mark_invalid(self.target_input, target_invalid)
         hidden_invalid = False
         for variable, stepper in (
-            (self.interval, self.interval_input), (self.full_frame_interval, self.full_frame_input),
+            (self.full_frame_interval, self.full_frame_input),
             (self.quality, self.quality_input), (self.video_fps, self.video_fps_input),
         ):
             try:
@@ -603,6 +602,8 @@ class SourceApp(ttk.Frame):
         )
 
     def _channel_from_editor(self) -> ChannelConfig:
+        selected = self.tree.selection()
+        previous = next((channel for channel in self.config.channels if selected and channel.name == selected[0]), None)
         identity = self._editor_window_identity if self.capture_type.get() == "window" else None
         is_window = self.capture_type.get() == "window"
         if is_window and identity is None and not self.window_executable.get():
@@ -630,7 +631,7 @@ class SourceApp(ttk.Frame):
             name=self.name.get().strip(),
             capture_type=self.capture_type.get(),
             capture_target=self._editor_window_title if is_window else self.capture_target.get().strip(),
-            interval_ms=number(self.interval, self.interval_input, "Capture interval"),
+            interval_ms=previous.interval_ms if previous is not None else 5000,
             full_frame_interval_seconds=number(
                 self.full_frame_interval, self.full_frame_input, "Full/keyframe interval"
             ),
@@ -734,7 +735,7 @@ class SourceApp(ttk.Frame):
         try:
             self.name.set("")
             self.capture_type.set("screen")
-            self.capture_format.set("WEBP + PATCH")
+            self.capture_format.set("H.264")
             self.capture_target.set("1")
             self._editor_window_identity = None
             self._editor_window_title = ""
@@ -754,14 +755,12 @@ class SourceApp(ttk.Frame):
         self._remember_editor()
 
     def _format_changed(self, _event: object = None) -> None:
-        capture_format = FORMAT_LABELS.get(self.capture_format.get())
-        is_video = capture_format == "video"
-        self.full_frame_label.configure(text="Keyframe (seconds)" if is_video else "Full frame (seconds)")
+        self.full_frame_label.configure(text="Keyframe (seconds)")
         fields = (
-            (self.interval_label, self.interval_input, not is_video, 0, "ew"),
-            (self.video_fps_label, self.video_fps_input, is_video, 0, "w"),
-            (self.full_frame_label, self.full_frame_input, capture_format != "webp", 1, "ew"),
-            (self.quality_label, self.quality_input, True, 1 if capture_format == "webp" else 2, "w"),
+            (self.interval_label, self.interval_input, False, 0, "ew"),
+            (self.video_fps_label, self.video_fps_input, True, 0, "w"),
+            (self.full_frame_label, self.full_frame_input, True, 1, "ew"),
+            (self.quality_label, self.quality_input, True, 2, "w"),
         )
         for label, widget, visible, column, sticky in fields:
             if visible:
@@ -1134,7 +1133,7 @@ class SourceApp(ttk.Frame):
         threading.Thread(target=work, name="capture-once", daemon=True).start()
 
     def _post_status(self, channel: str, status: str, detail: str) -> None:
-        if status in ("Error", "Upload error"):
+        if status in ("Error", "Upload error", "Diagnostic error"):
             logging.getLogger(__name__).error(
                 "Channel %s %s: %s", channel, status, detail,
                 exc_info=sys.exc_info()[0] is not None,

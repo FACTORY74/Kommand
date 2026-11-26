@@ -35,13 +35,14 @@ run the same Python command.
 
 Configuration is saved to `kommand-source/config.json`. The debug directory is
 cleared whenever the application starts. The Central connection panel shows
-outgoing request-body bandwidth across all channels as a five-second rolling
-average in Mbps. It includes multipart upload overhead but excludes HTTP headers
-and network protocol overhead.
+outgoing H.264 payload and JSON metadata bandwidth across all channels as a
+five-second rolling average in Mbps. It excludes WebSocket framing and network overhead.
 Each channel row shows a 50-pixel preview of its latest diagnostic frame. The
 preview is checked once per second; a capture error replaces it with a large X
 until that channel captures successfully again.
-Video channels refresh their diagnostic WebP image at most once per second.
+Channels refresh their diagnostic WebP image at most once per second on a separate
+bounded worker. Pending snapshots are replaced with the latest image; diagnostic
+write failures are logged and reported without delaying or backing off video uploads.
 Central can request an additional video keyframe when a browser viewer joins or
 needs to resynchronize; this does not change the configured periodic interval.
 Diagnostic images are saved atomically with unique temporary files. On Windows,
@@ -87,7 +88,8 @@ in `debug/` are cleared.
   stable title fragment. Existing channels and Central assignments are retained.
   Windows Graphics Capture renders the
   selected window even when other windows overlap it. Applications can block
-  capture; this is reported as an error instead of writing an empty debug image.
+  capture; capture errors are reported and retried. A valid entirely black scene
+  is allowed and is not treated as a capture failure.
 
 Existing `region` channels remain supported, but cannot be selected for new
 channels in the UI.
@@ -105,40 +107,36 @@ Previously published frames and Central panel assignments remain in place.
 Linux window capture depends on the display system and is not yet enabled. Use a
 screen target on Linux until X11 and Wayland requirements are decided.
 
-## Channel formats
+## H.264 channels
 
-- **WEBP** sends a complete screenshot at each capture interval.
-- **WEBP + PATCH** is the default, including for existing configurations. It sends
-  full frames, smaller change patches, and heartbeats.
-- **VIDEO** streams H.264 video frames without audio. Its separate **Video FPS**
-  setting is a target from 1 to 60 fps, defaulting to 15; actual throughput
-  depends on capture, encoding, and network performance.
+Every channel delivers H.264 without audio. **Video FPS** is a target from 1 to
+60 fps, defaulting to 15; actual throughput depends on capture, encoding and
+network performance. Quality controls H.264 compression, and **Keyframe
+(seconds)** controls the periodic refresh interval.
+WebP, WebP + Patch and older image configurations migrate automatically to video.
+Names, targets, quality, frame-rate settings and persistent window matching are
+retained; Save/Start persists the migration. The old image capture interval is
+retained as compatibility metadata but no longer controls delivery.
 
-Quality affects WebP compression and H.264 quality. The full-frame interval
-controls periodic full frames in patch mode and keyframes in video mode.
-The editor shows only the controls used by the selected format; switching
-formats retains the other settings for later use.
-Video restarts with a keyframe after a capture alignment or size change, an
-upload error, or a Central restart. Updating formats while running restarts only
-the affected channel.
+Identical captures do not encode another video packet; they send a heartbeat at
+most once per second. Periodic keyframes and viewer refresh requests still work
+while idle. Capture or dimension changes, upload failures and Central restarts
+start a new stream with a keyframe. Window movement alone does not restart video.
+Window capture remains necessary to obtain pixels from another application.
 
 ## Upload contract
 
-Each frame is sent as a multipart `POST` to:
+One persistent WebSocket is opened per channel:
 
 ```text
-/api/v1/sources/{source_name}/channels/{channel_name}/frames
+/api/v1/sources/{source_name}/channels/{channel_name}/video-upload
 ```
 
-The image part is named `frame`, and metadata is sent in `X-Kommand-*` headers.
-In patch mode, changed regions are sent as patches when smaller than a complete
-frame; unchanged captures send a heartbeat. A full frame is sent on startup,
-capture alignment or size changes, recovery after an upload error, and at the
-configured full-frame interval (60 seconds by default), subject to capture and
-network availability. If the full-frame interval is shorter than the capture
-interval, patch mode captures at the full-frame interval. VIDEO sends ordered
-H.264 packets to the channel's `/video` endpoint. Existing JPEG and PNG channel
-settings are migrated to WebP + Patch when loaded. Update Central and Source
-together: older Centrals cannot receive VIDEO, and older Sources using JPEG or
-PNG are rejected.
+Each packet has a JSON metadata message followed by binary Annex-B H.264 bytes.
+Metadata includes protocol `1`, capture timestamp, dimensions, stream ID,
+sequence, Central generation and a monotonic microsecond presentation timestamp.
+Central acknowledges accepted packets and can request the next frame be a
+keyframe. Idle heartbeats contain the accepted revision and generation without
+binary data. Rejected packets or failed acknowledgements reset the connection
+and encoder; there is no silent image/HTTP fallback. Update Source and Central together.
 

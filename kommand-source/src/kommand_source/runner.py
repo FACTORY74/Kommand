@@ -10,7 +10,7 @@ from typing import Callable
 
 from kommand_source.capture import MssCaptureProvider
 from kommand_source.config import ChannelConfig, SourceConfig
-from kommand_source.debug_store import DebugStore
+from kommand_source.debug_store import DebugStore, LatestDebugWriter
 from kommand_source.transport import CentralClient
 from kommand_common.bandwidth import RollingBandwidth
 
@@ -197,6 +197,11 @@ class SourceRunner:
         client = CentralClient(config, self.bandwidth)
         failures = 0
         last_debug = float("-inf")
+        last_status = float("-inf")
+        diagnostics = LatestDebugWriter(
+            self.debug_store, channel.name,
+            lambda detail: self.status_callback(channel.name, "Diagnostic error", detail),
+        )
         try:
             while not stop.is_set():
                 started = time.monotonic()
@@ -205,26 +210,22 @@ class SourceRunner:
                     frame = provider.capture(channel)
                     if stop.is_set():
                         break
-                    if channel.format != "video" or started - last_debug >= 1:
-                        self.debug_store.write(channel.name, frame)
+                    if started - last_debug >= 1:
+                        diagnostics.submit(frame)
                         last_debug = started
-                    self.status_callback(channel.name, "Captured", self._now())
                     if stop.is_set():
                         break
                     uploading = True
                     client.upload(channel, frame)
                     failures = 0
-                    self.status_callback(channel.name, "Uploaded", self._now())
+                    if started - last_status >= 1:
+                        self.status_callback(channel.name, "Uploaded", self._now())
+                        last_status = started
                 except Exception as exc:
                     failures += 1
                     self.status_callback(channel.name, "Upload error" if uploading else "Error", str(exc))
 
-                if channel.format == "video":
-                    capture_period = 1 / channel.video_fps
-                elif channel.format == "webp":
-                    capture_period = channel.interval_ms / 1000
-                else:
-                    capture_period = min(channel.interval_ms / 1000, channel.full_frame_interval_seconds)
+                capture_period = 1 / channel.video_fps
                 normal_delay = max(0.0, capture_period - (time.monotonic() - started))
                 if failures:
                     backoff = min(60.0, 2 ** min(failures - 1, 6))
@@ -233,6 +234,7 @@ class SourceRunner:
                     delay = normal_delay
                 stop.wait(delay)
         finally:
+            diagnostics.close()
             try:
                 provider.close()
             finally:

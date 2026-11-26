@@ -109,12 +109,13 @@ class WindowCaptureTests(unittest.TestCase):
         provider.capture(channel)
         provider.close()
 
-        session_type.assert_called_once_with(identity)
+        session_type.assert_called_once_with(identity, fps=15)
         self.assertEqual(session.capture.call_count, 2)
         session.close.assert_called_once()
         self.assertEqual((frame.width, frame.height), (640, 480))
-        self.assertEqual(frame.alignment, ("window", 42, 7, 99, 10, 20, 640, 480))
-        self.assertGreater(len(frame.content), 0)
+        self.assertEqual(frame.alignment, ("window", 42, 7, 99, 640, 480))
+        self.assertEqual(frame.content, b"")
+        self.assertEqual(frame.image.size, (640, 480))
 
     def test_legacy_window_binding_survives_title_change(self) -> None:
         identity = WindowIdentity(42, 7, 99)
@@ -135,7 +136,7 @@ class WindowCaptureTests(unittest.TestCase):
                     second_frame = provider.capture(channel)
                     provider.close()
         find.assert_called_once_with("First video")
-        session_type.assert_called_once_with(identity)
+        session_type.assert_called_once_with(identity, fps=15)
         self.assertEqual(first_frame.alignment, second_frame.alignment)
 
     def test_window_resize_restarts_the_capture_session(self) -> None:
@@ -213,7 +214,7 @@ class WindowCaptureTests(unittest.TestCase):
                 try:
                     with patch.dict(sys.modules, {"windows_capture": backend}):
                         with patch("kommand_source.capture.wgc_provider.resolve_window", return_value=window):
-                            with patch("kommand_source.capture.wgc_provider.Image.fromarray", return_value=Image.new("RGB", (4, 3), "red")):
+                            with patch("kommand_source.capture.wgc_provider.Image.frombuffer", return_value=Image.new("RGB", (4, 3), "red")):
                                 if outcome == "frame":
                                     image, _ = capture_rendered_window(identity)
                                     self.assertEqual(image.size, (4, 3))
