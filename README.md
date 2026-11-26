@@ -115,6 +115,12 @@ features as well as the current design.
 
 ## Development
 
+The shared application icon lives in `kommand-common/assets/`: `icon.svg` is
+the source artwork, `icon.ico` contains Windows icon sizes from 16 to 256 pixels,
+and `icon.png` is the desktop fallback on other platforms. Source, Central, and
+Central's output windows use it; browser displays use the SVG favicon.
+Regenerate the PNG from the SVG before rebuilding the ICO with IconMaker.
+
 Run the test suites from the repository root using the virtual environment:
 
 ```powershell

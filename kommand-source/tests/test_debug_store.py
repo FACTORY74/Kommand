@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -22,6 +23,41 @@ def frame(content: bytes, extension: str = "jpg") -> CapturedFrame:
 
 
 class DebugStoreTests(unittest.TestCase):
+    def test_write_retries_windows_reader_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DebugStore(Path(directory))
+            destination = store.write("main", frame(b"old"))
+            original_replace = Path.replace
+            attempts = []
+
+            def replace(path, target):
+                attempts.append(path)
+                if len(attempts) < 3:
+                    error = PermissionError("Reader has the image open")
+                    error.winerror = 5
+                    raise error
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", replace), patch("time.sleep"):
+                store.write("main", frame(b"new"))
+            self.assertEqual(destination.read_bytes(), b"new")
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(list(store.directory.iterdir()), [destination])
+
+    def test_persistent_lock_preserves_previous_image_and_cleans_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DebugStore(Path(directory))
+            destination = store.write("main", frame(b"old"))
+            error = PermissionError("Image remains locked")
+            error.winerror = 32
+            with patch.object(Path, "replace", side_effect=error) as replace:
+                with patch("time.sleep"):
+                    with self.assertRaises(PermissionError):
+                        store.write("main", frame(b"new"))
+            self.assertEqual(replace.call_count, 6)
+            self.assertEqual(destination.read_bytes(), b"old")
+            self.assertEqual(list(store.directory.iterdir()), [destination])
+
     def test_reset_removes_previous_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "debug"

@@ -15,7 +15,7 @@ from kommand_source.capture.wgc_provider import (
     WindowsCaptureSession,
     WindowsGraphicsCaptureError,
 )
-from kommand_source.capture.windows import WindowIdentity, find_window, get_window_identity
+from kommand_source.capture.windows import WindowIdentity, find_window, get_window_identity, resolve_matching_window
 
 
 class CaptureError(RuntimeError):
@@ -36,6 +36,7 @@ class CapturedFrame:
 class MssCaptureProvider:
     def __init__(self) -> None:
         self._legacy_windows: dict[tuple[str, str], WindowIdentity] = {}
+        self._matched_windows: dict[tuple[str, str, str], WindowIdentity] = {}
         self._window_session: WindowsCaptureSession | None = None
 
     def capture(self, channel: ChannelConfig) -> CapturedFrame:
@@ -59,7 +60,20 @@ class MssCaptureProvider:
 
     def _capture_window(self, channel: ChannelConfig) -> CapturedFrame:
         try:
-            if channel.window_handle is not None:
+            if channel.window_executable is not None and channel.window_title_match is not None:
+                key = (channel.name, channel.window_executable, channel.window_title_match)
+                identity = self._matched_windows.get(key)
+                if identity is None and (
+                    channel.window_handle is not None and channel.window_process_id is not None
+                    and channel.window_process_start is not None
+                ):
+                    identity = WindowIdentity(channel.window_handle, channel.window_process_id, channel.window_process_start)
+                if identity is None or self._window_session is None or self._window_session.identity != identity:
+                    _, identity = resolve_matching_window(
+                        channel.window_executable, channel.window_title_match, identity,
+                    )
+                    self._matched_windows[key] = identity
+            elif channel.window_handle is not None:
                 if channel.window_process_id is None or channel.window_process_start is None:
                     raise CaptureError("Window identity is incomplete; select the window again.")
                 identity = WindowIdentity(

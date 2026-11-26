@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from pathlib import Path
+import webbrowser
 
 import uvicorn
 from PIL import Image, ImageOps, ImageTk
@@ -130,17 +131,24 @@ class CentralApp(ttk.Frame):
         self.window_name_input.pack(side="left", padx=(6, 12))
         self.window_name_input.bind("<Return>", self._save_window_name)
         self.window_name_input.bind("<FocusOut>", self._save_window_name)
-        ttk.Label(controls, text="Root rows").pack(side="left")
-        NumberStepper(controls, self.layout_rows, minimum=1, maximum=12, width=3, zero_pad=2).pack(side="left", padx=(6, 12))
-        ttk.Label(controls, text="Columns").pack(side="left")
-        NumberStepper(controls, self.layout_columns, minimum=1, maximum=12, width=3, zero_pad=2).pack(side="left", padx=(6, 12))
-        action_button(controls, "Apply root grid", self._resize_layout, "primary").pack(side="left")
         style = ttk.Style(self.master)
         style.configure("OpenDisplay.TButton", background="#F59A45", foreground="#17110B")
         style.map("OpenDisplay.TButton", background=[("pressed", "#D87928"), ("active", "#FFB46B")])
         self.open_display_button = action_button(controls, "Open display", self._open_display)
         self.open_display_button.configure(style="OpenDisplay.TButton")
         self.open_display_button.pack(side="left", padx=(12, 0))
+        style.configure("BrowserDisplay.TButton", background="#EDAD57", foreground="#17110B")
+        style.map("BrowserDisplay.TButton", background=[("pressed", "#CE8938"), ("active", "#FFC477")])
+        browser_display_button = action_button(controls, "Browser display", self._open_browser_display)
+        browser_display_button.configure(style="BrowserDisplay.TButton")
+        browser_display_button.pack(side="left", padx=(8, 0))
+        grid_controls = ttk.Frame(layout_card, style="Card.TFrame")
+        grid_controls.pack(fill="x", pady=(0, 10))
+        ttk.Label(grid_controls, text="Root rows").pack(side="left")
+        NumberStepper(grid_controls, self.layout_rows, minimum=1, maximum=12, width=3, zero_pad=2).pack(side="left", padx=(6, 12))
+        ttk.Label(grid_controls, text="Columns").pack(side="left")
+        NumberStepper(grid_controls, self.layout_columns, minimum=1, maximum=12, width=3, zero_pad=2).pack(side="left", padx=(6, 12))
+        action_button(grid_controls, "Apply root grid", self._resize_layout, "primary").pack(side="left")
 
         self.layout_canvas = tk.Canvas(
             layout_card, height=240, background="#101318", highlightthickness=0,
@@ -231,7 +239,7 @@ class CentralApp(ttk.Frame):
             messagebox.showerror("Invalid port", "Port must be between 1 and 65535.")
             return
         config = uvicorn.Config(
-            create_app(self.store, self.layouts, self.receive_bandwidth),
+            create_app(self.store, self.layouts, self.receive_bandwidth, self.window_layouts),
             host=self.host.get().strip(),
             port=port,
             log_level="info",
@@ -275,6 +283,23 @@ class CentralApp(ttk.Frame):
         else:
             self.display_window.lift()
             self.display_window.focus_force()
+
+    def _open_browser_display(self) -> None:
+        if self._active_window is None or not self._save_window_name():
+            return
+        if not self.server or not self.server_thread or not self.server_thread.is_alive() or not self.server.started:
+            messagebox.showerror("Browser display", "Start the server before opening a browser display.", parent=self.master)
+            return
+        host = self.server.config.host
+        if host in ("0.0.0.0", ""):
+            host = "127.0.0.1"
+        elif host == "::":
+            host = "[::1]"
+        elif ":" in host:
+            host = f"[{host}]"
+        url = f"http://{host}:{self.server.config.port}/display/{self._active_window}"
+        if not webbrowser.open_new(url):
+            messagebox.showerror("Browser display", f"Could not open browser. Open {url} manually.", parent=self.master)
 
     def _render_window_tabs(self) -> None:
         signature = (self._active_window, tuple((key, layout.window_name) for key, layout in self.window_layouts.layouts.items()))

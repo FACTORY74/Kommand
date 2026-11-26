@@ -19,6 +19,51 @@ from kommand_source.ui.app import SourceApp  # noqa: E402
 
 
 class SourceUiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        executable = patch("kommand_source.ui.app.get_window_executable", return_value=r"C:\Apps\browser.exe")
+        executable.start()
+        self.addCleanup(executable.stop)
+
+    def test_saved_window_match_can_be_edited_without_live_window(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        channel = ChannelConfig(
+            name="video", capture_type="window", capture_target="Old video - YouTube",
+            window_executable=r"C:\Apps\browser.exe", window_title_match="YouTube",
+        )
+        with patch("kommand_source.ui.app.list_visible_windows", return_value=[]):
+            app = SourceApp(root, SourceConfig(channels=[channel]), Path("unused.json"), Mock())
+        app.window_title_match.set("Live stream")
+        edited = app._channel_from_editor()
+        self.assertEqual(edited.window_executable, channel.window_executable)
+        self.assertEqual(edited.window_title_match, "Live stream")
+        self.assertIsNone(edited.window_handle)
+
+    def test_rebinding_updates_target_without_losing_unsaved_edits(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        channel = ChannelConfig(
+            name="video", capture_type="window", capture_target="Old video",
+            window_handle=42, window_process_id=7, window_process_start=99,
+            window_executable=r"C:\Apps\browser.exe", window_title_match="YouTube",
+        )
+        with patch("kommand_source.ui.app.list_visible_windows", return_value=[]):
+            app = SourceApp(root, SourceConfig(channels=[channel]), Path("unused.json"), Mock())
+        app.quality.set("90")
+        app.window_binding_events.put((channel, WindowIdentity(43, 8, 100), "New video - YouTube"))
+        app._drain_events()
+        self.assertEqual(app.config.channels[0].window_handle, 43)
+        self.assertEqual(app.window_title_match.get(), "YouTube")
+        self.assertEqual(app.quality.get(), "90")
+        self.assertEqual(app._channel_from_editor().window_handle, 43)
+        self.assertFalse(app.update_button.instate(["disabled"]))
+
     def test_startup_selects_first_displayed_channel_from_loaded_config(self) -> None:
         try:
             root = tk.Tk()
@@ -191,6 +236,7 @@ class SourceUiTests(unittest.TestCase):
         channel = ChannelConfig(
             name="video", capture_type="window", capture_target="Browser",
             window_handle=42, window_process_id=7, window_process_start=99,
+            window_executable=r"C:\Apps\browser.exe", window_title_match="Browser",
         )
         with patch("kommand_source.ui.app.list_visible_windows", return_value=[window]):
             with patch("kommand_source.ui.app.get_window_identity", return_value=identity):
@@ -358,6 +404,29 @@ class SourceUiTests(unittest.TestCase):
             app._drain_events()
             self.assertIn("GitHub Desktop [0x2B]", app.target_input.cget("values"))
 
+    def test_refresh_windows_button_opens_updated_list(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        old = WindowInfo(42, "Old window", 0, 0, 800, 600)
+        new = WindowInfo(43, "New window", 0, 0, 800, 600)
+        app = SourceApp(root, SourceConfig(), Path("unused.json"), Mock())
+        root.geometry("1080x700-10000-10000")
+        app.capture_type.set("window")
+        with patch("kommand_source.ui.app.list_visible_windows", return_value=[old]) as discover:
+            app._capture_type_selected()
+            root.update()
+            discover.return_value = [new]
+            app.refresh_windows_button.invoke()
+            root.update()
+            self.assertEqual(app.target_input.cget("values"), ("New window [0x2B]",))
+            popup = root.tk.call("ttk::combobox::PopdownWindow", str(app.target_input))
+            self.assertTrue(root.tk.getboolean(root.tk.call("winfo", "ismapped", popup)))
+            self.assertEqual(app.capture_target.get(), "")
+            root.tk.call("ttk::combobox::Unpost", str(app.target_input))
+
     def test_format_and_video_fps_can_be_edited(self) -> None:
         try:
             root = tk.Tk()
@@ -521,6 +590,29 @@ class SourceUiTests(unittest.TestCase):
                     self.assertTrue(app._save())
             self.assertEqual(app.config.channels[0].window_handle, 42)
             self.assertEqual(app.config.channels[0].window_process_start, 99)
+            self.assertEqual(app.config.channels[0].window_executable, r"C:\Apps\browser.exe")
+            self.assertEqual(app.config.channels[0].window_title_match, "Browser")
+
+    def test_old_process_identity_migrates_without_recreating_channel(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        channel = ChannelConfig(
+            name="video", capture_type="window", capture_target="Browser", format="video", quality=82,
+            window_handle=42, window_process_id=7, window_process_start=99,
+        )
+        with patch("kommand_source.ui.app.list_visible_windows", return_value=[]):
+            app = SourceApp(root, SourceConfig(channels=[channel]), Path("unused.json"), Mock())
+        with patch("kommand_source.ui.app.resolve_window", side_effect=WindowDiscoveryError("old process gone")):
+            with patch("kommand_source.ui.app.find_window", return_value=WindowInfo(43, "Browser", 0, 0, 64, 48)):
+                with patch("kommand_source.ui.app.get_window_identity", return_value=WindowIdentity(43, 8, 100)):
+                    migrated = app._resolve_legacy_windows(app.config).channels[0]
+        self.assertEqual((migrated.name, migrated.format, migrated.quality), ("video", "video", 82))
+        self.assertEqual(migrated.window_handle, 43)
+        self.assertEqual(migrated.window_executable, r"C:\Apps\browser.exe")
+        self.assertEqual(migrated.window_title_match, "Browser")
 
     def test_selects_between_windows_with_identical_titles(self) -> None:
         try:

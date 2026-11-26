@@ -2,8 +2,9 @@ from pathlib import Path
 import sys
 import tempfile
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "kommand-central" / "src"), str(ROOT / "kommand-common" / "src")]
@@ -14,6 +15,30 @@ from kommand_central.ui import CentralApp
 
 
 class WindowTests(unittest.TestCase):
+    def test_browser_display_button_uses_active_layout_and_running_server(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        with patch("kommand_central.ui.LayoutStore", return_value=LayoutStore()):
+            app = CentralApp(root)
+        root.update()
+        buttons = [child for child in app.open_display_button.master.winfo_children()
+                   if child.winfo_class() == "TButton"]
+        browser_button = next(button for button in buttons if button.cget("text") == "BROWSER DISPLAY")
+        self.assertTrue(browser_button.winfo_ismapped())
+        with patch("kommand_central.ui.messagebox.showerror") as error:
+            app._open_browser_display()
+            error.assert_called_once()
+        app._add_window()
+        app.server = SimpleNamespace(started=True, config=SimpleNamespace(host="0.0.0.0", port=8000))
+        app.server_thread = Mock()
+        app.server_thread.is_alive.return_value = True
+        with patch("kommand_central.ui.webbrowser.open_new", return_value=True) as opened:
+            app._open_browser_display()
+        opened.assert_called_once_with(f"http://127.0.0.1:8000/display/{app._active_window}")
+
     def test_tabs_have_equal_rendered_height_when_selected_or_hovered(self):
         try:
             root = tk.Tk()

@@ -49,6 +49,8 @@ class ChannelConfig:
     window_process_start: int | None = None
     format: str = "webp_patch"
     video_fps: int = 15
+    window_executable: str | None = None
+    window_title_match: str | None = None
 
     def validate(self) -> None:
         if not CHANNEL_NAME_PATTERN.fullmatch(self.name):
@@ -68,6 +70,12 @@ class ChannelConfig:
         if not isinstance(self.video_fps, int) or isinstance(self.video_fps, bool) or not 1 <= self.video_fps <= 60:
             raise ValueError("Video FPS must be between 1 and 60.")
         identity = (self.window_handle, self.window_process_id, self.window_process_start)
+        selector = (self.window_executable, self.window_title_match)
+        if any(value is not None for value in selector):
+            if self.capture_type != "window" or any(
+                not isinstance(value, str) or not value.strip() for value in selector
+            ):
+                raise ValueError("Window matching requires an executable and a non-empty title fragment.")
         if any(value is not None for value in identity):
             if self.capture_type != "window" or any(
                 not isinstance(value, int) or isinstance(value, bool) or value <= 0

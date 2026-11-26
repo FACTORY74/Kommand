@@ -24,8 +24,10 @@ from kommand_source.capture.windows import (
     WindowInfo,
     find_window,
     get_window_identity,
+    get_window_executable,
     list_visible_windows,
     resolve_window,
+    resolve_matching_window,
 )
 from kommand_source.debug_store import DebugStore
 from kommand_source.runner import SourceRunner
@@ -80,6 +82,8 @@ class SourceApp(ttk.Frame):
         self.capture_type = tk.StringVar(value="screen")
         self.capture_format = tk.StringVar(value="WEBP + PATCH")
         self.capture_target = tk.StringVar(value="1")
+        self.window_executable = tk.StringVar()
+        self.window_title_match = tk.StringVar()
         self.interval = tk.StringVar(value="5000")
         self.video_fps = tk.StringVar(value="15")
         self.full_frame_interval = tk.StringVar(value="60")
@@ -94,6 +98,7 @@ class SourceApp(ttk.Frame):
             list[tuple[str, WindowIdentity, str | None, str | None]]
         ] = queue.Queue()
         self.window_check_thread: threading.Thread | None = None
+        self.window_binding_events: queue.Queue[tuple[ChannelConfig, WindowIdentity | None, str]] = queue.Queue()
         self._window_choices: dict[str, WindowInfo] = {}
         self._screen_choices: dict[str, str] = {}
         self._result_details: dict[str, str] = {}
@@ -114,6 +119,7 @@ class SourceApp(ttk.Frame):
         for variable in (
             self.name, self.capture_type, self.capture_format, self.capture_target,
             self.interval, self.full_frame_interval, self.quality, self.video_fps, self.enabled,
+            self.window_executable, self.window_title_match,
         ):
             variable.trace_add("write", self._editor_changed)
         self.source_name.trace_add("write", self._connection_changed)
@@ -241,9 +247,13 @@ class SourceApp(ttk.Frame):
         self.target_input.bind("<<ComboboxSelected>>", self._window_selected)
         self.target_input.bind("<FocusOut>", lambda _event: self.target_input.selection_clear(), add="+")
         self.refresh_windows_button = ttk.Button(
-            editor, text="REFRESH WINDOWS", command=self._refresh_windows
+            editor, text="REFRESH WINDOWS", command=self._show_window_choices
         )
         self.refresh_windows_button.grid(row=1, column=4, sticky="ew")
+        self.window_executable_label = ttk.Label(editor, text="Application executable")
+        self.window_executable_input = ttk.Entry(editor, textvariable=self.window_executable, state="readonly")
+        self.window_match_label = ttk.Label(editor, text="Title contains (reconnect match)")
+        self.window_match_input = ttk.Entry(editor, textvariable=self.window_title_match)
 
         self.interval_label = ttk.Label(editor, text="Interval (ms)")
         self.interval_input = NumberStepper(
@@ -519,6 +529,7 @@ class SourceApp(ttk.Frame):
             self.name.get().strip(), self.capture_type.get(), self.capture_format.get(), target,
             number(self.interval), number(self.full_frame_interval), number(self.quality),
             number(self.video_fps), self.enabled.get(),
+            self.window_executable.get(), self.window_title_match.get(),
         )
 
     @staticmethod
@@ -553,9 +564,10 @@ class SourceApp(ttk.Frame):
                 target_invalid = True
         elif capture_type == "window":
             identity = self._editor_window_identity
-            target_invalid = identity is None or self.capture_target.get() != self._window_label(
-                self._editor_window_title, identity.handle
-            )
+            target_invalid = identity is None and not self.window_executable.get()
+            if identity is not None:
+                target_invalid = self.capture_target.get() != self._window_label(self._editor_window_title, identity.handle)
+            self._mark_invalid(self.window_match_input, bool(self.window_executable.get()) and not self.window_title_match.get().strip())
         elif capture_type == "region":
             try:
                 parse_region_target(self.capture_target.get())
@@ -592,7 +604,8 @@ class SourceApp(ttk.Frame):
 
     def _channel_from_editor(self) -> ChannelConfig:
         identity = self._editor_window_identity if self.capture_type.get() == "window" else None
-        if self.capture_type.get() == "window" and identity is None:
+        is_window = self.capture_type.get() == "window"
+        if is_window and identity is None and not self.window_executable.get():
             raise ValueError("Select a window from the window list.")
         capture_format = FORMAT_LABELS.get(self.capture_format.get())
         if capture_format is None:
@@ -616,7 +629,7 @@ class SourceApp(ttk.Frame):
         channel = ChannelConfig(
             name=self.name.get().strip(),
             capture_type=self.capture_type.get(),
-            capture_target=self._editor_window_title if identity else self.capture_target.get().strip(),
+            capture_target=self._editor_window_title if is_window else self.capture_target.get().strip(),
             interval_ms=number(self.interval, self.interval_input, "Capture interval"),
             full_frame_interval_seconds=number(
                 self.full_frame_interval, self.full_frame_input, "Full/keyframe interval"
@@ -628,6 +641,8 @@ class SourceApp(ttk.Frame):
             window_handle=identity.handle if identity else None,
             window_process_id=identity.process_id if identity else None,
             window_process_start=identity.process_start if identity else None,
+            window_executable=(self.window_executable.get().strip() or None) if is_window else None,
+            window_title_match=(self.window_title_match.get().strip() or None) if is_window else None,
         )
         channel.validate()
         return channel
@@ -696,6 +711,8 @@ class SourceApp(ttk.Frame):
             self.capture_format.set(next(label for label, value in FORMAT_LABELS.items() if value == channel.format))
             self._editor_window_identity = self._channel_window_identity(channel)
             self._editor_window_title = channel.capture_target
+            self.window_executable.set(channel.window_executable or "")
+            self.window_title_match.set(channel.window_title_match or "")
             self.capture_target.set(
                 self._window_label(channel.capture_target, self._editor_window_identity.handle)
                 if self._editor_window_identity else channel.capture_target
@@ -721,6 +738,8 @@ class SourceApp(ttk.Frame):
             self.capture_target.set("1")
             self._editor_window_identity = None
             self._editor_window_title = ""
+            self.window_executable.set("")
+            self.window_title_match.set("")
             self.interval.set("5000")
             self.video_fps.set("15")
             self.full_frame_interval.set("60")
@@ -760,6 +779,8 @@ class SourceApp(ttk.Frame):
             self.capture_target.set("1" if capture_type == "screen" else "")
             self._editor_window_identity = None
             self._editor_window_title = ""
+            self.window_executable.set("")
+            self.window_title_match.set("")
         self._capture_type_changed()
         self._editor_changed()
 
@@ -768,6 +789,16 @@ class SourceApp(ttk.Frame):
         is_window = self.capture_type.get() == "window"
         self.refresh_windows_button.configure(state="normal" if is_window else "disabled")
         self.target_input.configure(state="readonly" if is_window else "normal")
+        for widget, row, column, span in (
+            (self.window_executable_label, 4, 0, 3),
+            (self.window_executable_input, 5, 0, 3),
+            (self.window_match_label, 4, 3, 2),
+            (self.window_match_input, 5, 3, 2),
+        ):
+            if is_window:
+                widget.grid(row=row, column=column, columnspan=span, sticky="ew", padx=(0, 12), pady=(6, 0))
+            else:
+                widget.grid_remove()
         if is_window:
             self._refresh_windows(show_errors=False)
         else:
@@ -802,7 +833,8 @@ class SourceApp(ttk.Frame):
                 )
                 matches = [
                     window for window in windows
-                    if existing is not None and query == existing.capture_target.casefold()
+                    if existing is not None and existing.window_executable is None
+                    and query == existing.capture_target.casefold()
                     and query and query in window.title.casefold()
                 ]
                 exact = [window for window in matches if window.title.casefold() == query]
@@ -818,6 +850,10 @@ class SourceApp(ttk.Frame):
             self.target_input.configure(values=())
             if show_errors:
                 messagebox.showerror("Window discovery", str(exc))
+
+    def _show_window_choices(self) -> None:
+        self.target_input.focus_set()
+        self.target_input.event_generate("<Down>")
 
     def _refresh_window_choices(self) -> None:
         if self.capture_type.get() == "window":
@@ -877,6 +913,7 @@ class SourceApp(ttk.Frame):
             return
         try:
             self._editor_window_identity = get_window_identity(window.handle)
+            executable = get_window_executable(window.handle)
         except WindowDiscoveryError as exc:
             self._editor_window_identity = None
             self._editor_window_title = ""
@@ -884,18 +921,29 @@ class SourceApp(ttk.Frame):
             messagebox.showerror("Window selection", str(exc))
             return
         self._editor_window_title = window.title
+        self.window_executable.set(executable)
+        self.window_title_match.set(window.title)
         self._editor_changed()
 
     def _resolve_legacy_windows(self, config: SourceConfig) -> SourceConfig:
         channels = []
         for channel in config.channels:
-            if channel.capture_type == "window" and self._channel_window_identity(channel) is None:
+            if channel.capture_type == "window" and channel.window_executable is None:
                 try:
-                    window = find_window(channel.capture_target)
+                    identity = self._channel_window_identity(channel)
+                    if identity is not None:
+                        try:
+                            window = resolve_window(identity)
+                        except WindowDiscoveryError:
+                            window = find_window(channel.capture_target)
+                    else:
+                        window = find_window(channel.capture_target)
                     identity = get_window_identity(window.handle)
+                    executable = get_window_executable(window.handle)
                     channel = replace(
                         channel, capture_target=window.title, window_handle=identity.handle,
                         window_process_id=identity.process_id, window_process_start=identity.process_start,
+                        window_executable=executable, window_title_match=channel.capture_target,
                     )
                 except WindowDiscoveryError as exc:
                     self._post_status(channel.name, "Error", str(exc))
@@ -1010,6 +1058,7 @@ class SourceApp(ttk.Frame):
             save_config(self.config_path, updated)
             self._apply_running_configuration(updated)
             self.config = updated
+            self._select_channel()
             self._remember_editor()
             if notify:
                 self.overall_status.set(f"Saved {self.config_path.name}")
@@ -1119,15 +1168,31 @@ class SourceApp(ttk.Frame):
         channels = [
             (channel.name, identity)
             for channel in self.config.channels
-            if (identity := self._channel_window_identity(channel)) is not None
+            if channel.window_executable is None
+            and (identity := self._channel_window_identity(channel)) is not None
         ]
-        if channels and (self.window_check_thread is None or not self.window_check_thread.is_alive()):
+        saved = [replace(channel) for channel in self.config.channels if channel.window_executable is not None]
+        if (channels or saved) and (self.window_check_thread is None or not self.window_check_thread.is_alive()):
             self.window_check_thread = threading.Thread(
-                target=self._probe_window_titles, args=(channels,),
+                target=self._probe_windows, args=(channels, saved),
                 name="window-title-check", daemon=True,
             )
             self.window_check_thread.start()
         self.after(5000, self._check_window_titles)
+
+    def _probe_windows(
+        self, channels: list[tuple[str, WindowIdentity]], saved: list[ChannelConfig],
+    ) -> None:
+        self._probe_window_titles(channels)
+        for channel in saved:
+            assert channel.window_executable is not None and channel.window_title_match is not None
+            try:
+                window, identity = resolve_matching_window(
+                    channel.window_executable, channel.window_title_match, self._channel_window_identity(channel),
+                )
+                self.window_binding_events.put((channel, identity, window.title))
+            except WindowDiscoveryError as exc:
+                self.window_binding_events.put((channel, None, str(exc)))
 
     def _probe_window_titles(self, channels: list[tuple[str, WindowIdentity]]) -> None:
         results = []
@@ -1183,6 +1248,39 @@ class SourceApp(ttk.Frame):
                                 self.capture_target.set(self._window_label(title, identity.handle))
                     updated_channels.append(channel)
                 self.config = replace(self.config, channels=updated_channels)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                original, identity, title = self.window_binding_events.get_nowait()
+                current = next((channel for channel in self.config.channels if channel.name == original.name), None)
+                if current != original:
+                    continue
+                if identity is None:
+                    if original.enabled:
+                        self._post_status(original.name, "Error", title)
+                    continue
+                updated = replace(
+                    original, capture_target=title, window_handle=identity.handle,
+                    window_process_id=identity.process_id, window_process_start=identity.process_start,
+                )
+                self.config = replace(
+                    self.config, channels=[updated if channel.name == original.name else channel for channel in self.config.channels],
+                )
+                if self.tree.exists(original.name):
+                    self.tree.set(original.name, "target", title)
+                if self.tree.selection() == (original.name,):
+                    old_values = self._editor_values()
+                    self._loading_editor = True
+                    try:
+                        self._editor_window_identity = identity
+                        self._editor_window_title = title
+                        self.capture_target.set(self._window_label(title, identity.handle))
+                    finally:
+                        self._loading_editor = False
+                    if old_values == self._editor_baseline:
+                        self._editor_baseline = self._editor_values()
+                    self._editor_changed()
         except queue.Empty:
             pass
         if self._stopping and not self.runner.running:

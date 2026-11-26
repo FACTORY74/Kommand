@@ -138,6 +138,10 @@ class LayoutStore:
         with self._lock:
             return self._root.to_dict()
 
+    def display_snapshot(self) -> tuple[dict[str, Any], int, str]:
+        with self._lock:
+            return self._root.to_dict(), self._revision, self.window_name
+
     def resize(self, rows: int, columns: int) -> None:
         _validate_dimensions(rows, columns)
         with self._lock:

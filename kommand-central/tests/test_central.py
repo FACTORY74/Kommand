@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from PIL import Image
 
@@ -15,11 +15,14 @@ sys.path[:0] = [
 ]
 
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 from kommand_central.bandwidth import ReceiveBandwidth  # noqa: E402
 from kommand_central.state import ChannelStore  # noqa: E402
 from kommand_central.layout import LayoutStore, Viewport  # noqa: E402
-from kommand_central.web import create_app  # noqa: E402
+from kommand_central.web import create_app, _VideoPacket, _VideoSubscriber  # noqa: E402
+from kommand_central.windows import DisplayLayouts  # noqa: E402
+from kommand_common import ASSETS  # noqa: E402
 
 
 def image_bytes(image_format: str = "WEBP", size: tuple[int, int] = (2, 1)) -> bytes:
@@ -29,6 +32,42 @@ def image_bytes(image_format: str = "WEBP", size: tuple[int, int] = (2, 1)) -> b
 
 
 class CentralTests(unittest.TestCase):
+    def test_browser_icons_are_served_from_shared_assets(self) -> None:
+        for extension, media_type in (("svg", "image/svg+xml"), ("ico", "image/vnd.microsoft.icon")):
+            with self.subTest(extension=extension):
+                response = self.client.get(f"/favicon.{extension}")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers["content-type"], media_type)
+                self.assertEqual(response.content, (ASSETS / f"icon.{extension}").read_bytes())
+
+    def test_slow_browser_drops_backlog_and_resumes_at_keyframe_without_disconnect(self) -> None:
+        subscriber = _VideoSubscriber()
+        keyframe = _VideoPacket(b"key", True, "stream", 16, 16, 0, 1)
+        delta = _VideoPacket(b"delta", False, "stream", 16, 16, 1, 2)
+        self.assertTrue(subscriber.offer(delta))
+        self.assertTrue(subscriber.queue.empty())
+        subscriber.offer(keyframe)
+        for _ in range(3):
+            subscriber.offer(delta)
+        self.assertTrue(subscriber.offer(delta))
+        self.assertTrue(subscriber.queue.empty())
+        self.assertTrue(subscriber.offer(delta))
+        self.assertFalse(subscriber.offer(keyframe))
+        self.assertEqual(subscriber.queue.get_nowait(), keyframe)
+        self.assertFalse(subscriber.offer(delta))
+        self.assertEqual(subscriber.queue.get_nowait(), delta)
+
+    def test_browser_disconnect_during_close_is_not_a_server_error(self) -> None:
+        app = create_app()
+        endpoint = next(route.endpoint for route in app.routes
+                        if getattr(route, "path", "") == "/api/v1/sources/{source}/channels/{channel}/video-stream")
+        websocket = Mock()
+        websocket.accept = AsyncMock()
+        websocket.receive = AsyncMock(return_value={"type": "websocket.disconnect", "code": 1006})
+        websocket.close = AsyncMock(side_effect=WebSocketDisconnect(1006))
+        asyncio.run(endpoint(websocket, "source", "main"))
+        websocket.close.assert_awaited_once()
+
     def setUp(self) -> None:
         self.store = ChannelStore()
         self.bandwidth = ReceiveBandwidth()
@@ -53,6 +92,24 @@ class CentralTests(unittest.TestCase):
         image = self.client.get(listing[0]["image_url"])
         self.assertEqual(image.content, content)
         self.assertEqual(image.headers["content-type"], "image/webp")
+
+    def test_browser_display_tracks_selected_layout_and_removal(self) -> None:
+        layouts = DisplayLayouts(LayoutStore())
+        second = layouts.add()
+        layouts.layouts[second].resize(1, 2)
+        layouts.layouts[second].assign((1,), "source/main")
+        client = TestClient(create_app(self.store, display_layouts=layouts))
+        page = client.get(f"/display/{second}")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("text/html", page.headers["content-type"])
+        state = client.get(f"/api/v1/display/{second}").json()
+        self.assertEqual(state["name"], layouts.layouts[second].window_name)
+        self.assertEqual(state["revision"], layouts.layouts[second].revision)
+        self.assertEqual(state["layout"]["children"][1]["channel"], "source/main")
+        self.assertNotEqual(state["layout"], client.get("/api/v1/display/default").json()["layout"])
+        layouts.remove(second)
+        self.assertEqual(client.get(f"/display/{second}").status_code, 404)
+        self.assertEqual(client.get(f"/api/v1/display/{second}").status_code, 404)
 
     def test_inbound_bandwidth_counts_upload_request_body(self) -> None:
         content = image_bytes()
@@ -370,3 +427,4 @@ class CentralTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+import asyncio

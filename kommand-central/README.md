@@ -34,6 +34,21 @@ move each window to its monitor and use F11 for fullscreen. **Delete window** be
 **Remove nesting** asks for confirmation before removing the active tab and closing its display window.
 Closing all tabs leaves **+** available to create a new one.
 
+**Browser display** opens the selected layout in the default browser while the
+Central server is running. It is an experimental, read-only display: edit the
+layout, zoom, pan, and channel assignments in Central or the Tk display. The
+browser reflects saved changes and offers a fullscreen button. Video channels
+are relayed as H.264 and decoded in the browser using WebCodecs (try a current
+Chrome or Edge). Joining viewers, decoder recovery, and slow connections request
+a fresh keyframe from Source rather than waiting for its periodic keyframe
+interval. Slow viewers discard their backlog and resynchronize without closing
+the connection. Restart both Central and Source to enable keyframe feedback.
+The browser detects stalled connections, paused sources, and Central restarts.
+WebP
+channels use the latest image. A single initial image is loaded for a video
+channel while its viewer waits for a keyframe. Central still decodes video for its previews and
+the Tk display, so this does not remove all server-side decoding work.
+
 The window list is saved in `windows.json`. The original layout stays in
 `layout.json`; additional layouts use `layout-<id>.json`. Removing a tab retains
 its layout file for recovery, but removes it from the saved window list.

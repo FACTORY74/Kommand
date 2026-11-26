@@ -17,6 +17,7 @@ sys.path[:0] = [
 ]
 
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 from kommand_central.state import ChannelStore  # noqa: E402
 from kommand_central.web import create_app  # noqa: E402
 from kommand_source.capture import CapturedFrame  # noqa: E402
@@ -211,6 +212,76 @@ class PatchIntegrationTests(unittest.TestCase):
         second = decoder.decode(av.Packet(self.session.payloads[1]))
         self.assertTrue(first[0].key_frame)
         self.assertTrue(second[0].key_frame)
+
+    def test_browser_join_requests_keyframe_without_waiting_for_periodic_interval(self) -> None:
+        channel = ChannelConfig(name="main", format="video", full_frame_interval_seconds=60)
+        with self.session.client as central:
+            with patch("kommand_source.transport.http.time.monotonic", return_value=100):
+                self.client.upload(channel, frame(self.image))
+                with central.websocket_connect("/api/v1/sources/source-1/channels/main/video-stream") as socket:
+                    self.client.upload(channel, frame(self.image))
+                    self.client.upload(channel, frame(self.image))
+                    decoder = av.CodecContext.create("h264", "r")
+                    decoded = [decoder.decode(av.Packet(packet))[0] for packet in self.session.payloads]
+                    self.assertTrue(decoded[-1].key_frame)
+                    self.assertEqual(self.session.headers[-1]["X-Kommand-Video-Sequence"], "2")
+                    self.assertTrue(socket.receive_json()["keyframe"])
+                    self.assertEqual(socket.receive_bytes(), self.session.payloads[-1])
+                    socket.send_text("keyframe")
+                    self.assertEqual(socket.receive_json(), {"type": "keyframe-requested"})
+                    self.client.upload(channel, frame(self.image))
+                    self.client.upload(channel, frame(self.image))
+                    self.assertFalse(decoder.decode(av.Packet(self.session.payloads[-2]))[0].key_frame)
+                    self.assertTrue(decoder.decode(av.Packet(self.session.payloads[-1]))[0].key_frame)
+                    socket.receive_json()
+                    socket.receive_bytes()
+                    self.assertTrue(socket.receive_json()["keyframe"])
+                    self.assertEqual(socket.receive_bytes(), self.session.payloads[-1])
+
+    def test_browser_video_receives_only_accepted_original_packets(self) -> None:
+        encoder = VideoEncoder(16, 16, 15, 80, 60)
+        image = Image.new("RGB", (16, 16), "red")
+        headers = {
+            "X-Kommand-Protocol": "1",
+            "X-Kommand-Captured-At": "2026-01-01T00:00:00Z",
+            "X-Kommand-Width": "16",
+            "X-Kommand-Height": "16",
+            "X-Kommand-Video-Stream": "a" * 32,
+            "X-Kommand-Video-Sequence": "0",
+        }
+        with TestClient(create_app(ChannelStore())) as client:
+            with client.websocket_connect("/api/v1/sources/source-1/channels/main/video-stream") as socket:
+                first = encoder.encode(image)
+                response = client.post(
+                    "/api/v1/sources/source-1/channels/main/video", headers=headers,
+                    files={"frame": ("frame.h264", first, "video/h264")},
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(socket.receive_json(), {
+                    "keyframe": True, "stream": "a" * 32, "width": 16, "height": 16,
+                    "sequence": 0, "revision": response.json()["revision"],
+                })
+                self.assertEqual(socket.receive_bytes(), first)
+                headers["X-Kommand-Video-Sequence"] = "1"
+                headers["X-Kommand-Generation"] = response.json()["generation"]
+                second = encoder.encode(image)
+                response = client.post(
+                    "/api/v1/sources/source-1/channels/main/video", headers=headers,
+                    files={"frame": ("frame.h264", second, "video/h264")},
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertFalse(socket.receive_json()["keyframe"])
+                self.assertEqual(socket.receive_bytes(), second)
+                response = client.post(
+                    "/api/v1/sources/source-1/channels/main/frames",
+                    headers={key: value for key, value in headers.items()
+                             if key in {"X-Kommand-Protocol", "X-Kommand-Captured-At",
+                                        "X-Kommand-Width", "X-Kommand-Height"}},
+                    files={"frame": ("frame.webp", frame(image).content, "image/webp")},
+                )
+                self.assertEqual(response.status_code, 202)
+                with self.assertRaises(WebSocketDisconnect):
+                    socket.receive_json()
 
     def test_video_rejects_out_of_order_packets_and_recovers_after_restart(self) -> None:
         channel = ChannelConfig(name="main", format="video")

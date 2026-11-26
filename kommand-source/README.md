@@ -42,6 +42,11 @@ Each channel row shows a 50-pixel preview of its latest diagnostic frame. The
 preview is checked once per second; a capture error replaces it with a large X
 until that channel captures successfully again.
 Video channels refresh their diagnostic WebP image at most once per second.
+Central can request an additional video keyframe when a browser viewer joins or
+needs to resynchronize; this does not change the configured periodic interval.
+Diagnostic images are saved atomically with unique temporary files. On Windows,
+brief access or sharing locks from preview readers are retried before reporting
+an error; a persistent failure leaves the previous image intact.
 
 Source defaults `OPENBLAS_NUM_THREADS` to `1` before loading the window-capture
 backend, avoiding an unused numerical thread pool. An existing setting is respected.
@@ -64,12 +69,23 @@ in `debug/` are cleared.
   individual monitor. An application window requires the `window` type rather
   than a window title as a screen target.
 - `window` (Windows): select a visible, non-minimized window from the list,
-  which refreshes when opened. Source captures its window handle and updates the
+  which refreshes when opened. **Refresh windows** opens the refreshed target
+  list immediately without changing the selected window. Source captures its window handle and updates the
   displayed title every five seconds, so title changes do not interrupt capture.
-  If the window closes or its saved process identity no longer matches, select
-  it again; Source does
-  not silently switch to another window. Existing title-only settings are bound
-  to a matching window when possible. Windows Graphics Capture renders the
+  Selecting a window also saves its executable path and an editable **Title
+  contains (reconnect match)** rule. Choose a stable, distinctive title fragment,
+  for example `YouTube` rather than a video's full changing title. Use **Update**
+  and **Save config** to persist the rule.
+  After a reboot or application restart, Source reconnects only when exactly one
+  visible, non-minimized window matches both the executable path and the
+  case-insensitive title fragment. Missing or multiple matches are reported as
+  errors and capture keeps retrying. A valid live binding stays attached through
+  title changes; it does not switch to another matching window.
+  Existing configurations gain a saved matching rule on Save/Start when their
+  original window or a unique title match is available. If the old title has
+  changed and the old process is gone, select the target again once, then save a
+  stable title fragment. Existing channels and Central assignments are retained.
+  Windows Graphics Capture renders the
   selected window even when other windows overlap it. Applications can block
   capture; this is reported as an error instead of writing an empty debug image.
 

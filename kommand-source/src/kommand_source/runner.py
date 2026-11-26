@@ -91,6 +91,17 @@ class SourceRunner:
         worker_channel = worker.channel
         if (
             worker_channel.capture_type == channel.capture_type == "window"
+            and worker_channel.window_executable is not None
+            and (worker_channel.window_executable, worker_channel.window_title_match)
+            == (channel.window_executable, channel.window_title_match)
+        ):
+            worker_channel = replace(
+                worker_channel, capture_target=channel.capture_target,
+                window_handle=channel.window_handle, window_process_id=channel.window_process_id,
+                window_process_start=channel.window_process_start,
+            )
+        if (
+            worker_channel.capture_type == channel.capture_type == "window"
             and worker_channel.window_handle is not None
             and worker_channel.window_handle == channel.window_handle
             and worker_channel.window_process_id == channel.window_process_id

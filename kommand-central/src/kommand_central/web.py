@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 import re
 from uuid import uuid4
 import warnings
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response
 from PIL import Image, UnidentifiedImageError
 
 from kommand_central.bandwidth import ReceiveBandwidth, _ReceiveBandwidthMiddleware
 from kommand_central.state import ChannelStore
 from kommand_central.layout import LayoutStore
 from kommand_central.video import VideoConflict, VideoDecodeError, VideoStreams
+from kommand_central.windows import DisplayLayouts
+from kommand_common import ASSETS
 
 
 MAX_FRAME_BYTES = 25 * 1024 * 1024
@@ -25,6 +29,41 @@ MAX_FRAME_WIDTH = 8192
 MAX_FRAME_HEIGHT = 8192
 MAX_FRAME_PIXELS = 33_554_432
 ALLOWED_MEDIA_TYPES = {"image/webp"}
+
+
+@dataclass(frozen=True, slots=True)
+class _VideoPacket:
+    content: bytes
+    keyframe: bool
+    stream: str
+    width: int
+    height: int
+    sequence: int
+    revision: int
+
+
+@dataclass(eq=False)
+class _VideoSubscriber:
+    queue: asyncio.Queue[_VideoPacket | None] = field(default_factory=lambda: asyncio.Queue(maxsize=4))
+    waiting: bool = True
+
+    def offer(self, packet: _VideoPacket | None) -> bool:
+        if self.queue.full():
+            while not self.queue.empty():
+                self.queue.get_nowait()
+            self.waiting = True
+        if packet is not None and self.waiting and not packet.keyframe:
+            return True
+        self.queue.put_nowait(packet)
+        self.waiting = False
+        return False
+
+
+def _h264_keyframe(content: bytes) -> bool:
+    return any(
+        match.end() < len(content) and content[match.end()] & 0x1f == 5
+        for match in re.finditer(b"\x00\x00(?:\x00)?\x01", content)
+    )
 
 
 def _validate_image(
@@ -84,12 +123,21 @@ def create_app(
     store: ChannelStore | None = None,
     layout_store: LayoutStore | None = None,
     receive_bandwidth: ReceiveBandwidth | None = None,
+    display_layouts: DisplayLayouts | None = None,
 ) -> FastAPI:
     channel_store = store or ChannelStore()
     layouts = layout_store or LayoutStore()
     bandwidth = receive_bandwidth or ReceiveBandwidth()
     generation = uuid4().hex
     video_streams = VideoStreams(channel_store, MAX_FRAME_PIXELS)
+    subscribers: dict[tuple[str, str], set[_VideoSubscriber]] = {}
+    keyframe_requests: set[tuple[str, str]] = set()
+
+    def publish(source: str, channel: str, packet: _VideoPacket | None) -> None:
+        key = (source, channel)
+        for subscriber in tuple(subscribers.get(key, ())):
+            if subscriber.offer(packet):
+                keyframe_requests.add(key)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -115,6 +163,14 @@ def create_app(
     app.state.receive_bandwidth = bandwidth
     app.add_middleware(_ReceiveBandwidthMiddleware, bandwidth=bandwidth)
 
+    @app.get("/favicon.svg", include_in_schema=False)
+    def favicon_svg() -> FileResponse:
+        return FileResponse(ASSETS / "icon.svg", media_type="image/svg+xml")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon_ico() -> FileResponse:
+        return FileResponse(ASSETS / "icon.ico", media_type="image/vnd.microsoft.icon")
+
     @app.get("/health")
     def health() -> dict[str, object]:
         return {"status": "ok", "channels": len(channel_store.list())}
@@ -131,6 +187,7 @@ def create_app(
                     "captured_at": frame.captured_at,
                     "received_at": frame.received_at,
                     "revision": frame.revision,
+                    "streaming": frame.streaming,
                     "image_url": f"/api/v1/sources/{frame.source}/channels/{frame.channel}/frame",
                 }
                 for frame in channel_store.list()
@@ -140,6 +197,75 @@ def create_app(
     @app.get("/api/v1/layout")
     def layout() -> dict[str, object]:
         return {"layout": layouts.snapshot()}
+
+    @app.get("/display/{window_id}")
+    def browser_display(window_id: str) -> FileResponse:
+        if display_layouts is None or window_id not in display_layouts.layouts:
+            raise HTTPException(status_code=404, detail="Display window not found")
+        return FileResponse(Path(__file__).with_name("browser_display.html"), media_type="text/html")
+
+    @app.get("/api/v1/display/{window_id}")
+    def browser_layout(window_id: str) -> dict[str, object]:
+        selected = display_layouts.layouts.get(window_id) if display_layouts else None
+        if selected is None:
+            raise HTTPException(status_code=404, detail="Display window not found")
+        snapshot, revision, name = selected.display_snapshot()
+        return {"layout": snapshot, "revision": revision, "name": name, "generation": generation}
+
+    @app.websocket("/api/v1/sources/{source}/channels/{channel}/video-stream")
+    async def browser_video(websocket: WebSocket, source: str, channel: str) -> None:
+        await websocket.accept()
+        key = (source, channel)
+        subscriber = _VideoSubscriber()
+        subscribers.setdefault(key, set()).add(subscriber)
+        keyframe_requests.add(key)
+
+        async def receive_requests() -> None:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                if message.get("text") == "keyframe":
+                    keyframe_requests.add(key)
+                    await websocket.send_json({"type": "keyframe-requested"})
+
+        disconnect = asyncio.create_task(receive_requests())
+        pending: asyncio.Task[_VideoPacket | None] | None = None
+        try:
+            while True:
+                pending = asyncio.create_task(subscriber.queue.get())
+                done, _ = await asyncio.wait((disconnect, pending), return_when=asyncio.FIRST_COMPLETED)
+                if disconnect in done:
+                    disconnect.result()
+                    break
+                packet = pending.result()
+                pending = None
+                if packet is None:
+                    break
+                await websocket.send_json({
+                    "keyframe": packet.keyframe, "stream": packet.stream,
+                    "width": packet.width, "height": packet.height,
+                    "sequence": packet.sequence, "revision": packet.revision,
+                })
+                await websocket.send_bytes(packet.content)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            disconnect.cancel()
+            if pending is not None:
+                pending.cancel()
+            subscribers[key].discard(subscriber)
+            if not subscribers[key]:
+                del subscribers[key]
+                keyframe_requests.discard(key)
+            for task in (disconnect, pending):
+                if task is not None:
+                    with suppress(asyncio.CancelledError, WebSocketDisconnect):
+                        await task
+            try:
+                await websocket.close()
+            except (RuntimeError, WebSocketDisconnect):
+                pass
 
     @app.get("/api/v1/sources/{source}/channels/{channel}/frame")
     def latest_frame(source: str, channel: str) -> Response:
@@ -177,6 +303,7 @@ def create_app(
             raise HTTPException(status_code=413, detail="Frame exceeds 25 MiB")
         image = _validate_image(content, frame.content_type, width, height)
         video_streams.discard(source, channel)
+        publish(source, channel, None)
         stored = channel_store.update(
             source, channel, content, frame.content_type, width, height, captured_at, image
         )
@@ -219,6 +346,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         video_streams.discard(source, channel)
+        publish(source, channel, None)
         return {"accepted": True, "revision": stored.revision, "generation": generation}
 
     @app.post("/api/v1/sources/{source}/channels/{channel}/video", status_code=202)
@@ -266,7 +394,14 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except VideoDecodeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"accepted": True, "revision": stored.revision, "generation": generation}
+        keyframe = _h264_keyframe(content)
+        publish(source, channel, _VideoPacket(content, keyframe, stream_id, width, height, sequence, stored.revision))
+        request_keyframe = (source, channel) in keyframe_requests and not keyframe
+        keyframe_requests.discard((source, channel))
+        return {
+            "accepted": True, "revision": stored.revision, "generation": generation,
+            "request_keyframe": request_keyframe,
+        }
 
     @app.post("/api/v1/sources/{source}/channels/{channel}/heartbeat")
     def heartbeat(

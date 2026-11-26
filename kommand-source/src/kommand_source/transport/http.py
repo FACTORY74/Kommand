@@ -93,6 +93,7 @@ class CentralClient:
         self._video_key: tuple[object, ...] | None = None
         self._video_stream: str | None = None
         self._last_video_keyframe = 0.0
+        self._force_video_keyframe = False
 
     def upload(self, channel: ChannelConfig, frame: CapturedFrame) -> None:
         if frame.image is not None:
@@ -183,7 +184,9 @@ class CentralClient:
                 self._video_stream = uuid4().hex
             sequence = self._video.sequence
             now = time.monotonic()
-            force_keyframe = sequence > 0 and now - self._last_video_keyframe >= channel.full_frame_interval_seconds
+            force_keyframe = sequence > 0 and (
+                self._force_video_keyframe or now - self._last_video_keyframe >= channel.full_frame_interval_seconds
+            )
             content = self._video.encode(image, force_keyframe=force_keyframe)
             if sequence == 0 or force_keyframe:
                 self._last_video_keyframe = now
@@ -206,6 +209,7 @@ class CentralClient:
         )
         self._revision = result["revision"]
         self._generation = result["generation"]
+        self._force_video_keyframe = result.get("request_keyframe", False) is True
 
     def _send(
         self, url: str, headers: dict[str, str], files: dict[str, tuple[str, bytes, str]] | None
@@ -235,6 +239,7 @@ class CentralClient:
         self._video = None
         self._video_key = None
         self._video_stream = None
+        self._force_video_keyframe = False
 
     def close(self) -> None:
         self._reset()

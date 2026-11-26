@@ -14,6 +14,23 @@ from kommand_source.config import (  # noqa: E402
 
 
 class ConfigTests(unittest.TestCase):
+    def test_persistent_window_matching_round_trips_without_process_identity(self) -> None:
+        channel = ChannelConfig(
+            name="video", capture_type="window", capture_target="YouTube",
+            window_executable=r"C:\Apps\browser.exe", window_title_match="YouTube",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            save_config(path, SourceConfig(channels=[channel]))
+            self.assertEqual(load_config(path).channels, [channel])
+        for values in (
+            {"window_executable": "browser.exe"},
+            {"window_executable": "browser.exe", "window_title_match": " "},
+            {"capture_type": "screen", "window_executable": "browser.exe", "window_title_match": "Video"},
+        ):
+            with self.assertRaisesRegex(ValueError, "Window matching"):
+                ChannelConfig(name="invalid", **values).validate()
+
     def test_round_trip(self) -> None:
         expected = SourceConfig(
             source_name="desk-1",

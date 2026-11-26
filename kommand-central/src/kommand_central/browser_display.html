@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kommand Display</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: #101318; color: #f2f5f8; font: 14px "Segoe UI", sans-serif; }
+    body { display: flex; flex-direction: column; padding: 0 12px 12px; }
+    header { display: flex; align-items: center; justify-content: space-between; min-height: 54px; }
+    h1 { font-size: 18px; font-weight: normal; margin: 0; }
+    button { color: inherit; background: #303844; border: 0; padding: 8px 14px; cursor: pointer; }
+    #error { color: #ffb46b; margin-left: 12px; }
+    #layout, .grid { min-width: 0; min-height: 0; width: 100%; height: 100%; }
+    #layout { flex: 1; }
+    .grid { display: grid; gap: 8px; padding: 4px; }
+    .tile { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #222832; border: 2px solid #222832; }
+    .picture { position: relative; flex: 1; min-height: 0; overflow: hidden; display: grid; place-items: center; color: #9aa6b2; }
+    .picture span { z-index: 1; background: #222832; }
+    .picture img, .picture canvas { position: absolute; width: 100%; height: 100%; object-fit: contain; }
+    .name { text-align: center; }
+  </style>
+</head>
+<body>
+  <header><h1 id="title"></h1><span id="error" role="alert"></span><button id="fullscreen">Fullscreen</button></header>
+  <main id="layout"></main>
+  <script>
+    "use strict";
+    const windowId = location.pathname.split("/").pop();
+    const layout = document.getElementById("layout");
+    const title = document.getElementById("title");
+    const error = document.getElementById("error");
+    let revision = null;
+    let generation = null;
+    let slots = [];
+
+    document.getElementById("fullscreen").addEventListener("click", async () => {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await document.documentElement.requestFullscreen();
+      } catch (exc) { error.textContent = `Fullscreen: ${exc.message}`; }
+    });
+
+    function stop(slot) {
+      if (slot.socket) {
+        slot.socket.onopen = slot.socket.onmessage = slot.socket.onclose = slot.socket.onerror = null;
+        slot.socket.close(); slot.socket = null;
+      }
+      if (slot.decoder) { if (slot.decoder.state !== "closed") slot.decoder.close(); slot.decoder = null; }
+    }
+
+    function requestKeyframe(slot, message) {
+      slot.status.hidden = false;
+      slot.status.textContent = message;
+      const now = performance.now();
+      if (slot.socket && slot.socket.readyState === WebSocket.OPEN && now - slot.keyframeRequestedAt >= 1000) {
+        slot.socket.send("keyframe");
+        slot.keyframeRequestedAt = now;
+      }
+    }
+
+    function build(node, path) {
+      if (node.type === "grid") {
+        const grid = document.createElement("div");
+        grid.className = "grid";
+        grid.style.gridTemplateColumns = `repeat(${node.columns}, minmax(0, 1fr))`;
+        grid.style.gridTemplateRows = `repeat(${node.rows}, minmax(0, 1fr))`;
+        node.children.forEach((child, index) => grid.append(build(child, [...path, index + 1])));
+        return grid;
+      }
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      const picture = document.createElement("div");
+      picture.className = "picture";
+      const status = document.createElement("span");
+      status.textContent = node.channel ? `Waiting for ${node.channel}` : "Unassigned panel";
+      const image = document.createElement("img");
+      image.hidden = true;
+      const canvas = document.createElement("canvas");
+      canvas.hidden = true;
+      const view = node.view;
+      const transform = `translate(${view.pan_x * 100}%, ${view.pan_y * 100}%) scale(${view.zoom})`;
+      image.style.transform = canvas.style.transform = transform;
+      picture.append(status, image, canvas);
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = `Panel ${path.join(".")} / ${node.channel || "Unassigned"}`;
+      tile.append(picture, name);
+      slots.push({
+        channel: node.channel, picture, status, image, canvas, revision: null,
+        mode: null, socket: null, decoder: null, lastPacketAt: 0, lastOutputAt: 0,
+        keyframeRequestedAt: -Infinity, sourcePaused: false, imagePending: false
+      });
+      return tile;
+    }
+
+    function codecFromPacket(bytes) {
+      for (let i = 0; i + 7 < bytes.length; i++) {
+        let start = 0;
+        if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) start = i + 3;
+        else if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 0 && bytes[i + 3] === 1) start = i + 4;
+        if (start && (bytes[start] & 31) === 7) {
+          return "avc1." + [...bytes.slice(start + 1, start + 4)].map(x => x.toString(16).padStart(2, "0")).join("");
+        }
+      }
+      return null;
+    }
+
+    function startVideo(slot, frame) {
+      if (!("VideoDecoder" in window)) {
+        slot.status.textContent = "Video requires a browser with WebCodecs (try Chrome or Edge).";
+        return;
+      }
+      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${protocol}//${location.host}/api/v1/sources/${encodeURIComponent(frame.source)}/channels/${encodeURIComponent(frame.channel)}/video-stream`;
+      const socket = slot.socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      let metadata = null, stream = null, waiting = true, timestamp = 0, sequence = null;
+      slot.lastPacketAt = slot.lastOutputAt = performance.now();
+      slot.keyframeRequestedAt = -Infinity;
+      slot.status.hidden = false;
+      slot.status.textContent = "Waiting for video keyframe";
+      socket.onopen = () => requestKeyframe(slot, "Synchronizing video");
+      socket.onmessage = event => {
+        if (slot.socket !== socket) return;
+        if (typeof event.data === "string") {
+          const message = JSON.parse(event.data);
+          if (!message.type) metadata = message;
+          return;
+        }
+        if (!metadata) return;
+        const packet = metadata;
+        metadata = null;
+        slot.lastPacketAt = performance.now();
+        const bytes = new Uint8Array(event.data);
+        if (stream !== packet.stream || (sequence !== null && packet.sequence !== sequence && !packet.keyframe)) {
+          stream = packet.stream;
+          waiting = true;
+          if (slot.decoder) { if (slot.decoder.state !== "closed") slot.decoder.close(); slot.decoder = null; }
+        }
+        sequence = packet.sequence + 1;
+        if (slot.decoder && slot.decoder.decodeQueueSize > 5) {
+          slot.decoder.close(); slot.decoder = null; waiting = true;
+        }
+        if (!slot.decoder) waiting = true;
+        if (waiting) {
+          if (!packet.keyframe) { requestKeyframe(slot, "Resynchronizing video"); return; }
+          const codec = codecFromPacket(bytes);
+          if (!codec) { slot.status.textContent = "Video keyframe is missing codec headers"; return; }
+          try {
+            const decoder = slot.decoder = new VideoDecoder({
+              output: videoFrame => {
+                if (slot.decoder !== decoder) { videoFrame.close(); return; }
+                if (slot.canvas.width !== packet.width || slot.canvas.height !== packet.height) {
+                  slot.canvas.width = packet.width;
+                  slot.canvas.height = packet.height;
+                }
+                slot.canvas.getContext("2d").drawImage(videoFrame, 0, 0, packet.width, packet.height, 0, 0, packet.width, packet.height);
+                videoFrame.close();
+                slot.canvas.hidden = false;
+                slot.image.hidden = true;
+                slot.status.hidden = true;
+                slot.lastOutputAt = performance.now();
+              },
+              error: exc => {
+                if (slot.decoder === decoder) {
+                  slot.decoder = null; waiting = true;
+                  requestKeyframe(slot, `Video decoder: ${exc.message}; resynchronizing`);
+                }
+              }
+            });
+            decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
+            waiting = false;
+          } catch (exc) {
+            if (slot.decoder && slot.decoder.state !== "closed") slot.decoder.close();
+            slot.decoder = null; waiting = true;
+            requestKeyframe(slot, `Video decoder: ${exc.message}; resynchronizing`);
+            return;
+          }
+        }
+        try {
+          slot.decoder.decode(new EncodedVideoChunk({ type: packet.keyframe ? "key" : "delta", timestamp: timestamp++, data: bytes }));
+        } catch (exc) {
+          if (slot.decoder && slot.decoder.state !== "closed") slot.decoder.close();
+          slot.decoder = null;
+          waiting = true;
+          requestKeyframe(slot, `Video decoder: ${exc.message}; resynchronizing`);
+        }
+      };
+      socket.onclose = () => { if (slot.socket === socket) { stop(slot); slot.status.hidden = false; slot.status.textContent = "Video disconnected; reconnecting"; } };
+      socket.onerror = () => { slot.status.hidden = false; slot.status.textContent = "Video connection failed"; };
+    }
+
+    async function refresh() {
+      try {
+        const [layoutResponse, channelsResponse] = await Promise.all([
+          fetch(`/api/v1/display/${encodeURIComponent(windowId)}`, { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+          fetch("/api/v1/channels", { cache: "no-store", signal: AbortSignal.timeout(5000) })
+        ]);
+        if (!layoutResponse.ok || !channelsResponse.ok) throw new Error(`Display unavailable (${layoutResponse.status}/${channelsResponse.status})`);
+        const current = await layoutResponse.json();
+        const channels = (await channelsResponse.json()).channels;
+        title.textContent = document.title = current.name;
+        if (revision !== current.revision || generation !== current.generation) {
+          slots.forEach(stop);
+          slots = [];
+          layout.replaceChildren(build(current.layout, []));
+          revision = current.revision;
+          generation = current.generation;
+        }
+        const frames = new Map(channels.map(frame => [`${frame.source}/${frame.channel}`, frame]));
+        for (const slot of slots) {
+          const frame = frames.get(slot.channel);
+          if (!frame) {
+            if (slot.channel) {
+              stop(slot);
+              slot.image.hidden = slot.canvas.hidden = true;
+              slot.mode = null;
+              slot.status.hidden = false;
+              slot.status.textContent = `Waiting for ${slot.channel}`;
+            }
+            continue;
+          }
+          const mode = frame.streaming ? "video" : "image";
+          if (slot.mode !== mode) {
+            stop(slot);
+            slot.mode = mode;
+            slot.revision = null;
+            slot.imagePending = false;
+            slot.status.hidden = false;
+            if (mode === "video") {
+              slot.canvas.hidden = true;
+              slot.image.onload = () => {
+                if (slot.mode === "video" && slot.canvas.hidden) {
+                  slot.image.hidden = false;
+                }
+              };
+              slot.image.onerror = () => { slot.status.hidden = false; slot.status.textContent = "Could not load initial video frame"; };
+              slot.image.src = `/api/v1/sources/${encodeURIComponent(frame.source)}/channels/${encodeURIComponent(frame.channel)}/frame?revision=${frame.revision}`;
+            }
+          }
+          if (mode === "video") {
+            const now = performance.now();
+            const sourcePaused = Date.now() - Date.parse(frame.received_at) > 3000;
+            if (sourcePaused) {
+              slot.status.hidden = false;
+              slot.status.textContent = "Source has stopped updating";
+            } else if (slot.sourcePaused && slot.socket) {
+              requestKeyframe(slot, "Source resumed; synchronizing video");
+            } else if (slot.socket && now - slot.lastPacketAt > 3000) {
+              stop(slot);
+              slot.status.hidden = false;
+              slot.status.textContent = "Video stalled; reconnecting";
+            } else if (slot.socket && now - slot.lastOutputAt > 2000) {
+              if (slot.decoder) { if (slot.decoder.state !== "closed") slot.decoder.close(); slot.decoder = null; }
+              requestKeyframe(slot, "No current video output; resynchronizing");
+            }
+            slot.sourcePaused = sourcePaused;
+            if (!slot.socket && !sourcePaused && "VideoDecoder" in window) startVideo(slot, frame);
+            else if (!("VideoDecoder" in window)) slot.status.textContent = "Video requires a browser with WebCodecs (try Chrome or Edge).";
+          } else if (frame.revision !== slot.revision && !slot.imagePending) {
+            slot.imagePending = true;
+            slot.image.onload = () => {
+              slot.imagePending = false;
+              slot.image.hidden = false; slot.canvas.hidden = true; slot.status.hidden = true;
+              slot.revision = frame.revision;
+            };
+            slot.image.onerror = () => {
+              slot.imagePending = false; slot.revision = null;
+              slot.status.hidden = false; slot.status.textContent = "Could not load frame; retrying";
+            };
+            slot.image.src = `/api/v1/sources/${encodeURIComponent(frame.source)}/channels/${encodeURIComponent(frame.channel)}/frame?revision=${frame.revision}`;
+          }
+        }
+        error.textContent = "";
+      } catch (exc) {
+        error.textContent = exc.message;
+        slots.forEach(slot => {
+          stop(slot);
+          slot.status.hidden = false;
+          slot.status.textContent = "Central unavailable; reconnecting";
+        });
+      }
+      setTimeout(refresh, 500);
+    }
+    refresh();
+  </script>
+</body>
+</html>

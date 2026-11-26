@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
+import sys
+
+from kommand_common import ASSETS
 
 
 COLORS = {
@@ -22,6 +25,10 @@ COLORS = {
 
 
 def apply_theme(master: tk.Tk) -> None:
+    if sys.platform == "win32":
+        master.iconbitmap(default=str(ASSETS / "icon.ico"))
+    else:
+        master.iconphoto(True, tk.PhotoImage(master=master, file=str(ASSETS / "icon.png")))
     colors = COLORS
     master.configure(background=colors["background"])
     style = ttk.Style(master)

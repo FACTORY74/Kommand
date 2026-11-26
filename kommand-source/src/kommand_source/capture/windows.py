@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ntpath
 import platform
 
 
@@ -102,6 +103,82 @@ def list_visible_windows() -> list[WindowInfo]:
 
     user32.EnumWindows(callback_type(visit), 0)
     return sorted(windows, key=lambda item: item.title.casefold())
+
+
+def get_window_executable(handle: int) -> str:
+    identity = get_window_identity(handle)
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    process = kernel32.OpenProcess(0x1000, False, identity.process_id)
+    if not process:
+        raise WindowDiscoveryError(f"Cannot read the window executable (Windows error {ctypes.get_last_error()}).")
+    try:
+        size = wintypes.DWORD(32768)
+        path = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+            raise WindowDiscoveryError(f"Cannot read the window executable (Windows error {ctypes.get_last_error()}).")
+        if get_window_identity(handle) != identity:
+            raise WindowDiscoveryError("The selected window changed while reading its executable.")
+        return path.value
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def find_matching_window(executable: str, title_fragment: str) -> WindowInfo:
+    query = title_fragment.strip().casefold()
+    if not query or not executable.strip():
+        raise WindowDiscoveryError("Window matching requires an executable and a title fragment.")
+    expected = ntpath.normcase(ntpath.normpath(executable))
+    candidates = [
+        window for window in list_visible_windows()
+        if query in window.title.casefold()
+        and ntpath.normcase(ntpath.normpath(get_window_executable(window.handle))) == expected
+    ]
+    if not candidates:
+        raise WindowDiscoveryError(
+            f"Waiting for a visible, non-minimized {ntpath.basename(executable)} window containing '{title_fragment}'."
+        )
+    if len(candidates) != 1:
+        raise WindowDiscoveryError(
+            f"Multiple {ntpath.basename(executable)} windows contain '{title_fragment}'; use a more specific title fragment."
+        )
+    return candidates[0]
+
+
+def resolve_matching_window(
+    executable: str, title_fragment: str, identity: WindowIdentity | None = None,
+) -> tuple[WindowInfo, WindowIdentity]:
+    if identity is not None:
+        try:
+            current = get_window_identity(identity.handle)
+        except WindowDiscoveryError:
+            current = None
+        if current == identity:
+            actual = get_window_executable(identity.handle)
+            if ntpath.normcase(ntpath.normpath(actual)) != ntpath.normcase(ntpath.normpath(executable)):
+                raise WindowDiscoveryError("The bound window does not match the saved executable.")
+            return resolve_window(identity), identity
+    window = find_matching_window(executable, title_fragment)
+    identity = get_window_identity(window.handle)
+    window = resolve_window(identity)
+    actual = get_window_executable(identity.handle)
+    if (
+        ntpath.normcase(ntpath.normpath(actual)) != ntpath.normcase(ntpath.normpath(executable))
+        or title_fragment.strip().casefold() not in window.title.casefold()
+        or get_window_identity(identity.handle) != identity
+    ):
+        raise WindowDiscoveryError("The matching window changed while reconnecting; retrying.")
+    return window, identity
 
 
 def find_window(title_query: str) -> WindowInfo:

@@ -18,10 +18,78 @@ from kommand_source.capture.wgc_provider import (  # noqa: E402
     capture_rendered_window, WindowCaptureResized, WindowsGraphicsCaptureError,
 )
 from kommand_source.config import ChannelConfig  # noqa: E402
-from kommand_source.capture.windows import WindowIdentity, WindowInfo, WindowDiscoveryError, resolve_window  # noqa: E402
+from kommand_source.capture.windows import (  # noqa: E402
+    WindowIdentity, WindowInfo, WindowDiscoveryError, resolve_window,
+    find_matching_window, resolve_matching_window,
+)
 
 
 class WindowCaptureTests(unittest.TestCase):
+    def test_persistent_match_requires_unique_executable_and_title_fragment(self) -> None:
+        windows = [
+            WindowInfo(1, "Video - YouTube", 0, 0, 64, 48),
+            WindowInfo(2, "Video - YouTube", 0, 0, 64, 48),
+        ]
+        with patch("kommand_source.capture.windows.list_visible_windows", return_value=windows):
+            with patch("kommand_source.capture.windows.get_window_executable", side_effect=[r"C:\Apps\Browser.exe", r"C:\Apps\Other.exe"]):
+                self.assertEqual(find_matching_window(r"c:\apps\browser.exe", "youtube"), windows[0])
+            with patch("kommand_source.capture.windows.get_window_executable", return_value=r"C:\Apps\Browser.exe"):
+                with self.assertRaisesRegex(WindowDiscoveryError, "Multiple"):
+                    find_matching_window(r"C:\Apps\Browser.exe", "YouTube")
+            with self.assertRaisesRegex(WindowDiscoveryError, "Waiting"):
+                find_matching_window(r"C:\Apps\Browser.exe", "Missing")
+
+    def test_persistent_binding_reconnects_after_reboot_and_retains_live_identity(self) -> None:
+        old = WindowIdentity(42, 7, 99)
+        new = WindowIdentity(43, 8, 100)
+        window = WindowInfo(43, "New video - YouTube", 0, 0, 64, 48)
+        with patch("kommand_source.capture.windows.get_window_identity", side_effect=[WindowDiscoveryError("gone"), new, new]):
+            with patch("kommand_source.capture.windows.find_matching_window", return_value=window):
+                with patch("kommand_source.capture.windows.resolve_window", return_value=window):
+                    with patch("kommand_source.capture.windows.get_window_executable", return_value="browser.exe"):
+                        self.assertEqual(resolve_matching_window("browser.exe", "YouTube", old), (window, new))
+        with patch("kommand_source.capture.windows.get_window_identity", return_value=new):
+            with patch("kommand_source.capture.windows.find_matching_window") as find:
+                with patch("kommand_source.capture.windows.resolve_window", return_value=window), patch(
+                    "kommand_source.capture.windows.get_window_executable", return_value="browser.exe",
+                ):
+                    self.assertEqual(resolve_matching_window("browser.exe", "YouTube", new), (window, new))
+                find.assert_not_called()
+
+    def test_saved_match_reconnects_capture_and_changes_frame_alignment(self) -> None:
+        old, new = WindowIdentity(42, 7, 99), WindowIdentity(43, 8, 100)
+        window = WindowInfo(43, "Video", 0, 0, 64, 48)
+        first, second = Mock(identity=old), Mock(identity=new)
+        first.capture.side_effect = [
+            (Image.new("RGB", (64, 48)), WindowInfo(42, "Video", 0, 0, 64, 48)),
+            WindowsGraphicsCaptureError("closed"),
+        ]
+        second.capture.return_value = (Image.new("RGB", (64, 48)), window)
+        channel = ChannelConfig(
+            name="video", capture_type="window", window_executable="browser.exe", window_title_match="Video",
+        )
+        with patch("kommand_source.capture.mss_provider.resolve_matching_window", side_effect=[(window, old), (window, new)]):
+            with patch("kommand_source.capture.mss_provider.WindowsCaptureSession", side_effect=[first, second]):
+                provider = MssCaptureProvider()
+                previous = provider.capture(channel)
+                with self.assertRaisesRegex(RuntimeError, "closed"):
+                    provider.capture(channel)
+                current = provider.capture(channel)
+                provider.close()
+        self.assertNotEqual(previous.alignment, current.alignment)
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
+    def test_minimized_live_window_is_not_replaced_by_another_match(self) -> None:
+        identity = WindowIdentity(42, 7, 99)
+        with patch("kommand_source.capture.windows.get_window_identity", return_value=identity):
+            with patch("kommand_source.capture.windows.get_window_executable", return_value="browser.exe"):
+                with patch("kommand_source.capture.windows.resolve_window", side_effect=WindowDiscoveryError("minimized")):
+                    with patch("kommand_source.capture.windows.find_matching_window") as find:
+                        with self.assertRaisesRegex(WindowDiscoveryError, "minimized"):
+                            resolve_matching_window("browser.exe", "Video", identity)
+                        find.assert_not_called()
+
     @patch("kommand_source.capture.mss_provider.WindowsCaptureSession")
     def test_window_capture_reuses_rendered_window_session(self, session_type) -> None:
         identity = WindowIdentity(42, 7, 99)

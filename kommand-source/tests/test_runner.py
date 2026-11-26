@@ -10,10 +10,25 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / "kommand-source" / "src"), str(ROOT / "kommand-common" / "src")]
 
 from kommand_source.config import ChannelConfig, SourceConfig  # noqa: E402
-from kommand_source.runner import SourceRunner  # noqa: E402
+from kommand_source.runner import SourceRunner, _Worker  # noqa: E402
 
 
 class RunnerTests(unittest.TestCase):
+    def test_rebinding_same_saved_match_does_not_restart_worker(self) -> None:
+        channel = ChannelConfig(
+            name="video", capture_type="window", capture_target="First video",
+            window_handle=42, window_process_id=7, window_process_start=99,
+            window_executable=r"C:\Apps\browser.exe", window_title_match="YouTube",
+        )
+        config = SourceConfig(channels=[channel])
+        worker = _Worker(Mock(), threading.Event(), config, channel)
+        rebound = replace(
+            channel, capture_target="New video", window_handle=43, window_process_id=8, window_process_start=100,
+        )
+        self.assertTrue(SourceRunner._matches(worker, config, rebound))
+        self.assertFalse(SourceRunner._matches(worker, config, replace(rebound, window_title_match="Different")))
+        self.assertFalse(SourceRunner._matches(worker, config, replace(rebound, quality=90)))
+
     @patch("kommand_source.runner.time.monotonic", return_value=100.0)
     @patch("kommand_source.runner.CentralClient")
     @patch("kommand_source.runner.MssCaptureProvider")
